@@ -4,8 +4,8 @@ import React, { useState, useEffect } from 'react';
 // --- CONFIGURATIE & TYPES ---
 
 const COLORS = ['red', 'blue', 'green', 'purple'];
-const MAX_PALLET = 70;
-const GRID_SIZE = 8; // Groter grid voor meer speelruimte
+const MAX_PALLET = 10;
+const GRID_SIZE = 8; 
 const TICK_SPEED = 800; 
 
 type StructureType = 'pallet' | 'conveyor' | 'sorter' | 'rolltainer' | 'cobot';
@@ -13,10 +13,10 @@ type StructureType = 'pallet' | 'conveyor' | 'sorter' | 'rolltainer' | 'cobot';
 interface GridCell {
   id: string;
   type: StructureType;
-  color?: string;       // Filterkleur (sorter/pallet) of Kratkleur (rolltainer)
-  count?: number;       // Aantal op pallet
-  rotation?: number;    // 0=Boven, 1=Rechts, 2=Onder, 3=Links (of 0=Verticaal, 1=Horizontaal voor Cobot)
-  crate?: string | null; // Het kratje dat momenteel getransporteerd wordt
+  color?: string;       
+  count?: number;       
+  rotation?: number;    
+  crate?: string | null; 
 }
 
 interface ShopItem {
@@ -36,33 +36,24 @@ const SHOP_ITEMS: ShopItem[] = [
 ];
 
 export default function WarenhuisSim() {
-  // --- STATE ---
   const [grid, setGrid] = useState<(GridCell | null)[]>(Array(GRID_SIZE * GRID_SIZE).fill(null));
-  const [money, setMoney] = useState(1000); // Iets meer startgeld voor de dure machines
+  const [money, setMoney] = useState(1000); 
   const [score, setScore] = useState(0);
   
-  // Interactie
   const [selectedShopItem, setSelectedShopItem] = useState<StructureType | null>(null);
   const [moveSourceIndex, setMoveSourceIndex] = useState<number | null>(null);
   const [isMoveMode, setIsMoveMode] = useState(false);
 
-  // --- HULPFUNCTIES ---
-
   const uid = () => Math.random().toString(36).substr(2, 9);
 
-  // Helper om buur-index te vinden. 
-  // Voor Cobot (asgewijs) en Banden (richting)
   const getNeighborIndex = (index: number, direction: number) => {
     const row = Math.floor(index / GRID_SIZE);
     const col = index % GRID_SIZE;
-    let nextRow = row;
-    let nextCol = col;
-
-    if (direction === 0) nextRow--; // Boven
-    if (direction === 1) nextCol++; // Rechts
-    if (direction === 2) nextRow++; // Onder
-    if (direction === 3) nextCol--; // Links
-
+    let nextRow = row; let nextCol = col;
+    if (direction === 0) nextRow--; 
+    if (direction === 1) nextCol++; 
+    if (direction === 2) nextRow++; 
+    if (direction === 3) nextCol--; 
     if (nextRow < 0 || nextRow >= GRID_SIZE || nextCol < 0 || nextCol >= GRID_SIZE) return null;
     return nextRow * GRID_SIZE + nextCol;
   };
@@ -74,12 +65,9 @@ export default function WarenhuisSim() {
         const nextGrid = JSON.parse(JSON.stringify(currentGrid));
         let changed = false;
 
-        // STAP 1: ROLLTAINERS GENEREREN KRATJES
-        // Als een rolltainer geen kratje "klaar" heeft staan, maakt hij er een.
         for (let i = 0; i < currentGrid.length; i++) {
-          const cell = nextGrid[i]; // Gebruik nextGrid om direct te updaten
+          const cell = nextGrid[i];
           if (cell && cell.type === 'rolltainer' && !cell.crate) {
-             // 20% kans per tick dat er een nieuwe verschijnt (simuleer aanvoer)
              if (Math.random() > 0.5) {
                  cell.crate = COLORS[Math.floor(Math.random() * COLORS.length)];
                  changed = true;
@@ -87,76 +75,50 @@ export default function WarenhuisSim() {
           }
         }
 
-        // STAP 2: COBOTS (VERPLAATSEN VAN ROLLTAINER NAAR BAND)
         for (let i = 0; i < currentGrid.length; i++) {
           const cobot = currentGrid[i];
           if (cobot && cobot.type === 'cobot') {
-            // Cobot rotatie: 0 = Verticaal (Checkt Boven/Onder), 1 = Horizontaal (Checkt Links/Rechts)
             const isVertical = cobot.rotation === 0 || cobot.rotation === 2;
-            
-            const sideA = getNeighborIndex(i, isVertical ? 0 : 3); // Boven of Links
-            const sideB = getNeighborIndex(i, isVertical ? 2 : 1); // Onder of Rechts
-            
+            const sideA = getNeighborIndex(i, isVertical ? 0 : 3);
+            const sideB = getNeighborIndex(i, isVertical ? 2 : 1);
             const idxs = [sideA, sideB];
-            
-            // Simpele logica: Zoek in buren naar een Rolltainer MET krat en een Band ZONDER krat
-            let sourceIdx = -1;
-            let targetIdx = -1;
+            let sourceIdx = -1; let targetIdx = -1;
 
-            // Zoek bron
             if (idxs[0] !== null && nextGrid[idxs[0]]?.type === 'rolltainer' && nextGrid[idxs[0]]?.crate) sourceIdx = idxs[0]!;
             else if (idxs[1] !== null && nextGrid[idxs[1]]?.type === 'rolltainer' && nextGrid[idxs[1]]?.crate) sourceIdx = idxs[1]!;
 
-            // Zoek doel (Moet een Conveyor zijn)
             if (sourceIdx !== -1) {
-               // Het doel is de 'andere' kant
                const potentialTarget = sourceIdx === idxs[0] ? idxs[1] : idxs[0];
-               
                if (potentialTarget !== null) {
                  const targetCell = nextGrid[potentialTarget];
-                 // Check of doel een band is en leeg is
                  if (targetCell && targetCell.type === 'conveyor' && !targetCell.crate) {
                    targetIdx = potentialTarget;
                  }
                }
             }
-
-            // ACTIE: Verplaats
             if (sourceIdx !== -1 && targetIdx !== -1) {
                nextGrid[targetIdx].crate = nextGrid[sourceIdx].crate;
-               nextGrid[sourceIdx].crate = null; // Haal uit rolltainer
+               nextGrid[sourceIdx].crate = null;
                changed = true;
             }
           }
         }
 
-        // STAP 3: TRANSPORTEURS (BANDEN & SORTERS)
-        // We itereren backwards om gaten te vullen zonder 'teleportatie' over de hele band in 1 tick
-        // (Simpele array movement logic)
-        // Maar voor stabiliteit gebruiken we hier de "Snapshot" logica van currentGrid -> nextGrid
-        
         for (let i = 0; i < currentGrid.length; i++) {
           const cell = currentGrid[i];
-          
           if (cell && (cell.type === 'conveyor' || cell.type === 'sorter') && cell.crate) {
-            
             let targetIndex: number | null = null;
-
             if (cell.type === 'conveyor') {
-              targetIndex = getNeighborIndex(i, cell.rotation!);
+              targetIndex = getNeighborIndex(i, cell.rotation);
             } else if (cell.type === 'sorter') {
               if (cell.crate === cell.color) {
-                targetIndex = getNeighborIndex(i, cell.rotation!); // Rechtdoor
+                targetIndex = getNeighborIndex(i, cell.rotation);
               } else {
-                targetIndex = getNeighborIndex(i, (cell.rotation! + 1) % 4); // Rechtsaf
+                targetIndex = getNeighborIndex(i, (cell.rotation! + 1) % 4);
               }
             }
-
-            // Probeer te verplaatsen
             if (targetIndex !== null && targetIndex >= 0) {
               const targetCell = nextGrid[targetIndex];
-
-              // Naar Pallet
               if (targetCell && targetCell.type === 'pallet') {
                 if (targetCell.color === cell.crate && targetCell.count! < MAX_PALLET) {
                   targetCell.count!++;
@@ -164,9 +126,7 @@ export default function WarenhuisSim() {
                   changed = true;
                 }
               }
-              // Naar Band/Sorter (Alleen als doel in NEXT grid nog leeg is, of in current grid leeg was)
               else if (targetCell && (targetCell.type === 'conveyor' || targetCell.type === 'sorter')) {
-                 // Cruciaal: check of doel leeg is in de 'toekomstige' staat, anders schuiven dingen over elkaar
                  if (!targetCell.crate) {
                    targetCell.crate = cell.crate;
                    nextGrid[i].crate = null;
@@ -176,20 +136,14 @@ export default function WarenhuisSim() {
             }
           }
         }
-
         return changed ? nextGrid : currentGrid;
       });
     }, TICK_SPEED);
-
     return () => clearInterval(interval);
   }, []);
 
-  // --- HANDLERS ---
-
   const handleCellClick = (index: number) => {
     const cell = grid[index];
-
-    // 1. Verplaatsen
     if (isMoveMode) {
       if (moveSourceIndex === null) {
         if (cell) setMoveSourceIndex(index);
@@ -205,7 +159,6 @@ export default function WarenhuisSim() {
       return;
     }
 
-    // 2. Bouwen
     if (selectedShopItem) {
       if (!cell) {
         const item = SHOP_ITEMS.find(i => i.type === selectedShopItem);
@@ -214,7 +167,7 @@ export default function WarenhuisSim() {
           newGrid[index] = {
             id: uid(),
             type: selectedShopItem,
-            rotation: (selectedShopItem === 'cobot') ? 0 : 1, // Cobot start verticaal, banden rechts
+            rotation: (selectedShopItem === 'cobot') ? 0 : 1,
             color: (selectedShopItem === 'pallet' || selectedShopItem === 'sorter') ? 'red' : undefined,
             count: 0,
             crate: null
@@ -227,18 +180,13 @@ export default function WarenhuisSim() {
       return;
     }
 
-    // 3. Configureren (Draaien / Kleur)
     if (cell) {
       const newGrid = [...grid];
-      
-      // Cobot: Toggle tussen Verticaal (0) en Horizontaal (1)
       if (cell.type === 'cobot') {
          newGrid[index] = { ...cell, rotation: cell.rotation === 0 ? 1 : 0 };
          setGrid(newGrid);
          return;
       }
-
-      // Conveyor / Sorter: Draai 90 graden
       if (cell.type === 'conveyor' || cell.type === 'sorter') {
         newGrid[index] = { ...cell, rotation: (cell.rotation! + 1) % 4 };
         setGrid(newGrid);
@@ -296,6 +244,15 @@ export default function WarenhuisSim() {
       if(c === 'green') return 'bg-green-500';
       if(c === 'purple') return 'bg-purple-500';
       return 'bg-gray-500';
+  };
+
+  // Nieuwe helper voor tekstkleur (pijlen)
+  const getTextColor = (c?: string) => {
+    if(c === 'red') return 'text-red-500';
+    if(c === 'blue') return 'text-blue-500';
+    if(c === 'green') return 'text-green-500';
+    if(c === 'purple') return 'text-purple-500';
+    return 'text-neutral-400';
   };
 
   return (
@@ -364,7 +321,7 @@ export default function WarenhuisSim() {
                         key={i}
                         onClick={() => handleCellClick(i)}
                         onDragOver={(e) => e.preventDefault()}
-                        onDrop={handleTruckDrop} // Alleen voor truck-drop op verkeerde plek te voorkomen
+                        onDrop={handleTruckDrop} 
                         className={`w-14 h-14 md:w-16 md:h-16 rounded border relative flex items-center justify-center transition-all
                             ${!cell ? 'bg-neutral-900 border-neutral-800 hover:border-neutral-600' : 'bg-neutral-700 border-neutral-600'}
                             ${isMoveMode && cell ? 'cursor-grab hover:brightness-110 border-orange-400' : ''}
@@ -391,12 +348,11 @@ export default function WarenhuisSim() {
                                 {/* COBOT */}
                                 {cell.type === 'cobot' && (
                                     <div className={`w-full h-full flex items-center justify-center transition-transform ${cell.rotation === 1 ? 'rotate-90' : ''}`}>
-                                        <div className="w-2 h-full bg-slate-500 rounded-full absolute opacity-50"></div> {/* As */}
-                                        <div className="w-full h-2 bg-slate-400 absolute"></div> {/* Arm */}
+                                        <div className="w-2 h-full bg-slate-500 rounded-full absolute opacity-50"></div>
+                                        <div className="w-full h-2 bg-slate-400 absolute"></div>
                                         <div className="z-10 w-8 h-8 rounded-full bg-slate-300 border-4 border-slate-500 flex items-center justify-center shadow-lg">
                                             <span className="text-sm">🦾</span>
                                         </div>
-                                        {/* Pijl indicatie voor richting */}
                                         <div className="absolute top-0 text-[8px] text-slate-400">▲</div>
                                         <div className="absolute bottom-0 text-[8px] text-slate-400">▼</div>
                                     </div>
@@ -413,12 +369,16 @@ export default function WarenhuisSim() {
                                 {/* SORTER */}
                                 {cell.type === 'sorter' && (
                                     <div className={`w-full h-full relative border-2 border-double border-neutral-400 rounded ${getRotationClass(cell.rotation)}`}>
-                                        <span className="absolute top-0 left-1/2 -translate-x-1/2 text-[8px]">⬆</span>
-                                        <span className="absolute top-1/2 right-0 -translate-y-1/2 text-[8px]">➡</span>
+                                        {/* Kleurkiezer linksboven */}
                                         <div 
                                             onClick={(e) => cycleColor(e, i)}
-                                            className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-6 h-6 rounded-full border-2 border-white shadow cursor-pointer hover:scale-110 z-10 ${getBgColor(cell.color)}`}
+                                            className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full border border-white shadow-sm cursor-pointer hover:scale-110 z-30 ${getBgColor(cell.color)}`}
                                         ></div>
+                                        
+                                        {/* Pijl in kleur van filter */}
+                                        <span className={`absolute top-0 left-1/2 -translate-x-1/2 text-lg font-bold ${getTextColor(cell.color)}`}>⬆</span>
+                                        <span className="absolute top-1/2 right-0 -translate-y-1/2 text-[8px] text-neutral-400">➡</span>
+                                        <div className="absolute inset-2 border border-neutral-500 opacity-20 rounded-sm"></div>
                                     </div>
                                 )}
 
@@ -429,9 +389,14 @@ export default function WarenhuisSim() {
                                         onDragStart={(e) => handlePalletDragStart(e, i)}
                                         className="w-full h-full flex flex-col justify-between bg-black/20 rounded p-1"
                                     >
-                                        <div className="flex justify-between items-start">
-                                            <div onClick={(e) => cycleColor(e, i)} className={`w-3 h-3 rounded-full border cursor-pointer ${getBgColor(cell.color)}`}></div>
-                                            <span className={`text-[9px] font-mono leading-none ${cell.count! >= MAX_PALLET ? 'text-green-400 animate-pulse' : 'text-neutral-400'}`}>
+                                        <div className="flex justify-between items-start relative h-full">
+                                            {/* Kleurkiezer linksboven */}
+                                            <div 
+                                              onClick={(e) => cycleColor(e, i)} 
+                                              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full border border-white shadow-sm cursor-pointer z-30 ${getBgColor(cell.color)}`}
+                                            ></div>
+                                            
+                                            <span className={`text-[9px] font-mono absolute top-0 right-0 ${cell.count! >= MAX_PALLET ? 'text-green-400 animate-pulse' : 'text-neutral-400'}`}>
                                                 {cell.count}
                                             </span>
                                         </div>
@@ -439,9 +404,9 @@ export default function WarenhuisSim() {
                                     </div>
                                 )}
 
-                                {/* BEWEGEND KRATJE (Overlay) */}
+                                {/* BEWEGEND KRATJE */}
                                 {cell.crate && cell.type !== 'rolltainer' && (
-                                    <div className="absolute inset-0 z-20 flex items-center justify-center">
+                                    <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
                                         <div className={`w-6 h-6 rounded-sm shadow-md border border-white/40 ${getBgColor(cell.crate)}`}></div>
                                     </div>
                                 )}
