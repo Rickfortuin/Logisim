@@ -1,253 +1,494 @@
 "use client";
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
-// Kleuren configuratie
-const COLORS = ['red', 'blue', 'green'];
-const MAX_PALLET_CAPACITY = 70; // Zoals gevraagd
-const ROLLTAINER_CAPACITY = 28; // 2x2x7
+// --- CONFIGURATIE & TYPES ---
 
-export default function HorecaLogistiek() {
-  // State voor de rolltainer (de kratten)
-  const [rolltainer, setRolltainer] = useState<{id: number, color: string}[]>([]);
-  
-  // State voor de pallets (opslag)
-  const [pallets, setPallets] = useState([
-    { color: 'red', count: 0 },
-    { color: 'blue', count: 0 },
-    { color: 'green', count: 0 },
-  ]);
+const COLORS = ['red', 'blue', 'green', 'purple'];
+const MAX_PALLET = 70;
+const GRID_SIZE = 5; // 5x5 Grid
+const TICK_SPEED = 800; // Snelheid van de lopende banden (ms)
 
+// Definieer wat er in een vakje kan zitten (De TS Fix)
+type StructureType = 'pallet' | 'conveyor' | 'sorter';
+
+interface GridCell {
+  id: string;
+  type: StructureType;
+  color?: string;       // Kleur van pallet of sorter-filter
+  count?: number;       // Aantal kratten op pallet
+  rotation?: number;    // 0=Boven, 1=Rechts, 2=Onder, 3=Links
+  crate?: string | null; // De kleur van de krat die er OP ligt (transport)
+}
+
+interface ShopItem {
+  type: StructureType;
+  price: number;
+  label: string;
+  icon: string;
+}
+
+const SHOP_ITEMS: ShopItem[] = [
+  { type: 'conveyor', price: 50, label: 'Band', icon: '⬆️' },
+  { type: 'sorter', price: 150, label: 'Sorter', icon: '🔀' },
+  { type: 'pallet', price: 100, label: 'Pallet', icon: '📦' },
+];
+
+export default function AutomationGame() {
+  // --- STATE ---
+  const [grid, setGrid] = useState<(GridCell | null)[]>(Array(GRID_SIZE * GRID_SIZE).fill(null));
+  const [rolltainer, setRolltainer] = useState<string[]>([]); // Simpele stapel voor nu
+  const [money, setMoney] = useState(600); // Startbudget
   const [score, setScore] = useState(0);
-  const [message, setMessage] = useState("Sleep kratten naar de juiste pallet!");
+  
+  // Interactie modus
+  const [selectedShopItem, setSelectedShopItem] = useState<StructureType | null>(null);
+  const [moveSourceIndex, setMoveSourceIndex] = useState<number | null>(null);
+  const [isMoveMode, setIsMoveMode] = useState(false);
 
-  // Initialiseer de eerste rolltainer bij start
+  // --- HULPFUNCTIES ---
+
+  // Genereer een ID
+  const uid = () => Math.random().toString(36).substr(2, 9);
+
+  // Bereken index van buurman op basis van richting
+  const getNeighborIndex = (index: number, direction: number = 0) => {
+    const row = Math.floor(index / GRID_SIZE);
+    const col = index % GRID_SIZE;
+    let nextRow = row;
+    let nextCol = col;
+
+    if (direction === 0) nextRow--; // Boven
+    if (direction === 1) nextCol++; // Rechts
+    if (direction === 2) nextRow++; // Onder
+    if (direction === 3) nextCol--; // Links
+
+    if (nextRow < 0 || nextRow >= GRID_SIZE || nextCol < 0 || nextCol >= GRID_SIZE) return null;
+    return nextRow * GRID_SIZE + nextCol;
+  };
+
+  // --- GAME LOOP (AUTOMATISERING) ---
   useEffect(() => {
-    getNewRolltainer();
+    const interval = setInterval(() => {
+      setGrid((currentGrid) => {
+        const nextGrid = JSON.parse(JSON.stringify(currentGrid)); // Deep copy
+        let changed = false;
+
+        // We itereren 2x: eerst logica bepalen, dan uitvoeren om botsingen te voorkomen
+        // Simpele versie: We verwerken cellen die een krat hebben
+        
+        // Stap 1: Loop door grid en verplaats kratten
+        // We doen dit in omgekeerde volgorde om 'opstoppingen' iets beter te simuleren
+        for (let i = 0; i < currentGrid.length; i++) {
+          const cell = currentGrid[i];
+          
+          // Alleen actie als er een structuur is én er ligt een krat op (voor transport)
+          if (cell && cell.crate) {
+            
+            // LOGICA PER TYPE
+            let targetIndex: number | null = null;
+
+            if (cell.type === 'conveyor') {
+              // Beweeg in de richting van de pijl
+              targetIndex = getNeighborIndex(i, cell.rotation);
+            } else if (cell.type === 'sorter') {
+              // Sorter logica: Match kleur -> Rechtdoor (rotatie), Anders -> Rechtsaf (rotatie + 1)
+              if (cell.crate === cell.color) {
+                targetIndex = getNeighborIndex(i, cell.rotation);
+              } else {
+                targetIndex = getNeighborIndex(i, (cell.rotation! + 1) % 4);
+              }
+            }
+
+            // Als er een doel is, probeer te verplaatsen
+            if (targetIndex !== null && targetIndex >= 0) {
+              const targetCell = nextGrid[targetIndex];
+
+              // SCENARIO A: Doel is een Pallet
+              if (targetCell && targetCell.type === 'pallet') {
+                if (targetCell.color === cell.crate && targetCell.count < MAX_PALLET) {
+                  // Succesvolle opslag
+                  targetCell.count++;
+                  nextGrid[i].crate = null; // Verwijder van huidige band
+                  changed = true;
+                }
+              }
+              // SCENARIO B: Doel is een andere band/sorter (Transport)
+              else if (targetCell && (targetCell.type === 'conveyor' || targetCell.type === 'sorter')) {
+                // Alleen verplaatsen als doel leeg is
+                if (!targetCell.crate) {
+                  targetCell.crate = cell.crate;
+                  nextGrid[i].crate = null;
+                  changed = true;
+                }
+              }
+            }
+          }
+        }
+        
+        // Controleer op volle pallets -> Auto sell als ze 70 halen? 
+        // Laten we dat handmatig houden voor de 'game feel', of auto-cash voor flow.
+        // Laten we auto-cash doen als bonus feature.
+        nextGrid.forEach((cell: GridCell | null, idx: number) => {
+           if (cell && cell.type === 'pallet' && cell.count! >= MAX_PALLET) {
+               // Pallet vol!
+               // Hier zou je hem leeg kunnen maken of wachten op speler.
+               // We laten hem vol staan zodat speler hem moet slepen (zie drag/drop).
+           }
+        });
+
+        return changed ? nextGrid : currentGrid;
+      });
+    }, TICK_SPEED);
+
+    return () => clearInterval(interval);
   }, []);
 
-  // Functie om een nieuwe rolltainer te genereren (28 kratten)
-  const getNewRolltainer = () => {
-    const newCrates = Array.from({ length: ROLLTAINER_CAPACITY }).map((_, i) => ({
-      id: Date.now() + i,
-      color: COLORS[Math.floor(Math.random() * COLORS.length)]
-    }));
-    setRolltainer(newCrates);
-    setMessage("Nieuwe rolltainer binnengekomen!");
+  // Roltainer vullen
+  useEffect(() => {
+    if (rolltainer.length < 5) {
+      const timer = setInterval(() => {
+        setRolltainer(prev => [...prev, COLORS[Math.floor(Math.random() * COLORS.length)]]);
+      }, 2000);
+      return () => clearInterval(timer);
+    }
+  }, [rolltainer]);
+
+
+  // --- INTERACTIE HANDLERS ---
+
+  const handleCellClick = (index: number) => {
+    const cell = grid[index];
+
+    // MODUS 1: Verplaatsen (Move Mode)
+    if (isMoveMode) {
+      if (moveSourceIndex === null) {
+        if (cell) setMoveSourceIndex(index); // Selecteer bron
+      } else {
+        // Verplaats actie
+        const newGrid = [...grid];
+        const temp = newGrid[moveSourceIndex];
+        newGrid[moveSourceIndex] = newGrid[index];
+        newGrid[index] = temp;
+        setGrid(newGrid);
+        setMoveSourceIndex(null);
+        setIsMoveMode(false);
+      }
+      return;
+    }
+
+    // MODUS 2: Shop / Bouwen
+    if (selectedShopItem) {
+      if (!cell) {
+        // Kopen
+        const item = SHOP_ITEMS.find(i => i.type === selectedShopItem);
+        if (item && money >= item.price) {
+          const newGrid = [...grid];
+          newGrid[index] = {
+            id: uid(),
+            type: selectedShopItem,
+            rotation: 1, // Standaard naar rechts
+            color: selectedShopItem === 'pallet' ? 'red' : (selectedShopItem === 'sorter' ? 'red' : undefined),
+            count: 0,
+            crate: null
+          };
+          setGrid(newGrid);
+          setMoney(m => m - item.price);
+          setSelectedShopItem(null); // Deselecteer na bouwen
+        }
+      }
+      return;
+    }
+
+    // MODUS 3: Configureren (Draaien / Kleur)
+    if (cell) {
+      const newGrid = [...grid];
+      // Als sorter: Klik in midden verandert kleur, klik rand verandert rotatie?
+      // Simpel: Klik is draaien, Shift+Klik (of rechtermuis) is kleur.
+      // Voor mobiel vriendelijkheid: Klik = draaien. Dubbelklik = kleur (voor sorter/pallet).
+      
+      // We doen: Klik = Draaien. 
+      // Er komt een apart knopje in de UI voor kleur.
+      if (cell.type === 'conveyor' || cell.type === 'sorter') {
+        newGrid[index] = { ...cell, rotation: (cell.rotation! + 1) % 4 };
+        setGrid(newGrid);
+      }
+    }
   };
 
-  // --- DRAG & DROP HANDLERS ---
-
-  // Start slepen (kan een krat zijn OF een volle pallet)
-  const handleDragStart = (e: React.DragEvent, type: 'crate' | 'pallet', data: any) => {
-    e.dataTransfer.setData("type", type);
-    e.dataTransfer.setData("data", JSON.stringify(data));
+  // Aparte handler om kleur te cyclen
+  const cycleColor = (e: React.MouseEvent, index: number) => {
+    e.stopPropagation();
+    const cell = grid[index];
+    if (cell && (cell.type === 'sorter' || cell.type === 'pallet')) {
+      const newGrid = [...grid];
+      const currentColorIdx = COLORS.indexOf(cell.color || 'red');
+      const nextColor = COLORS[(currentColorIdx + 1) % COLORS.length];
+      newGrid[index] = { ...cell, color: nextColor };
+      setGrid(newGrid);
+    }
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault(); // Nodig om drop toe te staan
+  // Drag & Drop vanuit Roltainer
+  const handleDragStart = (e: React.DragEvent, color: string) => {
+    e.dataTransfer.setData("color", color);
+    e.dataTransfer.setData("source", "rolltainer");
   };
 
-  // Drop logica
-  const handleDrop = (e: React.DragEvent, targetType: 'pallet' | 'truck', targetIndex?: number) => {
+  const handleDrop = (e: React.DragEvent, index: number) => {
     e.preventDefault();
-    const type = e.dataTransfer.getData("type");
-    const data = JSON.parse(e.dataTransfer.getData("data"));
-
-    // SCENARIO 1: Krat op Pallet droppen
-    if (type === 'crate' && targetType === 'pallet') {
-      const targetPallet = pallets[targetIndex!];
+    const color = e.dataTransfer.getData("color");
+    const source = e.dataTransfer.getData("source");
+    
+    if (source === "rolltainer") {
+      const cell = grid[index];
       
-      // Validatie
-      if (targetPallet.color !== data.color) {
-        setMessage("❌ Verkeerde kleur! Kijk goed.");
-        return;
+      // Drop op Band of Sorter
+      if (cell && (cell.type === 'conveyor' || cell.type === 'sorter') && !cell.crate) {
+        const newGrid = [...grid];
+        newGrid[index]!.crate = color;
+        setGrid(newGrid);
+        setRolltainer(prev => prev.slice(1)); // Verwijder bovenste uit roltainer
       }
-      if (targetPallet.count >= MAX_PALLET_CAPACITY) {
-        setMessage("⚠️ Deze pallet is vol (70)! Sleep hem naar de vrachtwagen.");
-        return;
-      }
-
-      // Update state: Verwijder uit rolltainer, voeg toe aan pallet
-      const newRolltainer = rolltainer.filter(c => c.id !== data.id);
-      setRolltainer(newRolltainer);
-
-      const newPallets = [...pallets];
-      newPallets[targetIndex!].count += 1;
-      setPallets(newPallets);
-      
-      // Feedback
-      if (newPallets[targetIndex!].count === MAX_PALLET_CAPACITY) {
-        setMessage(`🎉 ${data.color.toUpperCase()} pallet is VOL! Sleep naar de truck.`);
+      // Drop op Pallet
+      else if (cell && cell.type === 'pallet') {
+        if (cell.color === color && cell.count! < MAX_PALLET) {
+          const newGrid = [...grid];
+          newGrid[index]!.count!++;
+          setGrid(newGrid);
+          setRolltainer(prev => prev.slice(1));
+        }
       }
     }
 
-    // SCENARIO 2: Volle Pallet op Truck droppen
-    if (type === 'pallet' && targetType === 'truck') {
-      const palletIndex = data.index;
-      const pallet = pallets[palletIndex];
-
-      if (pallet.count < MAX_PALLET_CAPACITY) {
-        setMessage(`❌ Deze pallet is nog niet vol (pas ${pallet.count}/${MAX_PALLET_CAPACITY}).`);
-        return;
-      }
-
-      // Pallet is vol en wordt op truck geladen
-      const newPallets = [...pallets];
-      newPallets[palletIndex].count = 0; // Reset pallet
-      setPallets(newPallets);
-      setScore(s => s + 500); // Grote bonus
-      setMessage("🚛 Pallet geladen! Goed werk.");
+    // Drop van Pallet naar Truck (Verkoop)
+    const type = e.dataTransfer.getData("type");
+    if (type === 'full_pallet') {
+        // Logic handled in Truck drop zone
     }
   };
 
-  // Helper voor kleuren
-  const getColorClass = (color: string) => {
-    switch(color) {
-      case 'red': return 'bg-red-500 border-red-700';
-      case 'blue': return 'bg-blue-500 border-blue-700';
-      case 'green': return 'bg-green-500 border-green-700';
-      default: return 'bg-gray-500';
-    }
+  const handlePalletDragStart = (e: React.DragEvent, index: number) => {
+      const cell = grid[index];
+      if(cell && cell.type === 'pallet' && cell.count! >= MAX_PALLET) {
+          e.dataTransfer.setData("type", "full_pallet");
+          e.dataTransfer.setData("index", index.toString());
+      }
+  };
+
+  const handleTruckDrop = (e: React.DragEvent) => {
+      e.preventDefault();
+      const type = e.dataTransfer.getData("type");
+      if(type === 'full_pallet') {
+          const index = parseInt(e.dataTransfer.getData("index"));
+          const newGrid = [...grid];
+          // Verkoop!
+          newGrid[index] = null; // Pallet weg, ruimte vrij
+          setGrid(newGrid);
+          setMoney(m => m + 300);
+          setScore(s => s + 1);
+      }
+  };
+
+  // --- RENDERING HELPERS ---
+  const getRotationClass = (rot: number = 0) => {
+      switch(rot) {
+          case 0: return 'rotate-0';
+          case 1: return 'rotate-90';
+          case 2: return 'rotate-180';
+          case 3: return '-rotate-90';
+          default: return '';
+      }
+  };
+
+  const getBgColor = (c?: string) => {
+      if(c === 'red') return 'bg-red-500';
+      if(c === 'blue') return 'bg-blue-500';
+      if(c === 'green') return 'bg-green-500';
+      if(c === 'purple') return 'bg-purple-500';
+      return 'bg-gray-500';
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white font-sans p-6 flex flex-col items-center">
-      <div className="w-full max-w-6xl">
+    <div className="min-h-screen bg-slate-900 text-white font-sans p-4 flex flex-col items-center select-none">
+      
+      {/* HUD */}
+      <div className="w-full max-w-4xl bg-slate-800 p-4 rounded-xl border-b-4 border-slate-600 mb-6 flex justify-between items-center shadow-lg sticky top-0 z-10">
+        <div>
+           <h1 className="text-xl font-black italic text-yellow-400">AUTO-LOGISTICS</h1>
+           <p className="text-xs text-slate-400">Bouw een geautomatiseerd sorteersysteem</p>
+        </div>
+        <div className="flex gap-6 text-right">
+            <div>
+                <span className="block text-[10px] text-slate-400">GELD</span>
+                <span className="text-2xl font-mono text-green-400">€{money}</span>
+            </div>
+             <div>
+                <span className="block text-[10px] text-slate-400">VERKOCHT</span>
+                <span className="text-2xl font-mono text-blue-400">{score}</span>
+            </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col lg:flex-row gap-8 items-start justify-center w-full max-w-6xl">
         
-        {/* Header */}
-        <div className="flex justify-between items-center mb-8 bg-slate-800 p-4 rounded-xl border border-slate-700">
-          <div>
-            <h1 className="text-2xl font-bold text-yellow-400">Horeca Distributie</h1>
-            <p className="text-slate-400 text-sm">Vul pallets tot 70 stuks → Sleep naar truck</p>
-          </div>
-          <div className="text-right">
-            <p className="text-xs text-slate-400">SCORE</p>
-            <p className="text-3xl font-mono text-green-400">€ {score}</p>
-          </div>
-        </div>
-
-        {/* Message Bar */}
-        <div className="text-center mb-6 h-8 font-semibold text-orange-300">
-          {message}
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
-          
-          {/* ZONE 1: ROLLTAINER (BRON) */}
-          <div className="flex flex-col items-center bg-slate-800 p-4 rounded-xl min-h-[500px] border-2 border-slate-600">
-            <h2 className="font-bold mb-4 flex items-center gap-2">🛒 Horeca Rolltainer <span className="text-xs font-normal text-slate-400">({rolltainer.length} stuks)</span></h2>
-            
-            {/* De Rolltainer Container */}
-            <div className="border-4 border-zinc-400 rounded-lg p-2 bg-zinc-800 w-48 min-h-[400px] relative">
-              {/* Raster voor 2 breed */}
-              <div className="grid grid-cols-2 gap-1 content-end h-full">
-                {rolltainer.map((crate) => (
-                  <div
-                    key={crate.id}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, 'crate', crate)}
-                    className={`${getColorClass(crate.color)} h-10 rounded shadow-md border-b-4 cursor-grab active:cursor-grabbing hover:scale-105 transition-transform flex items-center justify-center`}
-                  >
-                    <span className="text-[10px] opacity-50">|||</span>
-                  </div>
-                ))}
+        {/* SHOP LINKS */}
+        <div className="flex flex-col gap-2 bg-slate-800 p-4 rounded-xl border border-slate-700 min-w-[150px]">
+          <h2 className="font-bold text-slate-300 mb-2">🛒 SHOP</h2>
+          {SHOP_ITEMS.map((item) => (
+            <button
+              key={item.type}
+              onClick={() => { setSelectedShopItem(item.type); setIsMoveMode(false); }}
+              className={`flex items-center justify-between p-3 rounded border-2 transition-all
+                ${selectedShopItem === item.type ? 'border-yellow-400 bg-slate-700' : 'border-slate-600 bg-slate-800 hover:bg-slate-700'}
+                ${money < item.price ? 'opacity-50 cursor-not-allowed' : ''}
+              `}
+              disabled={money < item.price}
+            >
+              <div className="flex gap-2">
+                  <span>{item.icon}</span>
+                  <span className="text-sm font-bold">{item.label}</span>
               </div>
-              
-              {/* Leegmelding */}
-              {rolltainer.length === 0 && (
-                <div className="absolute inset-0 flex items-center justify-center flex-col">
-                  <p className="text-slate-500 mb-4">Rolltainer leeg</p>
-                  <button 
-                    onClick={getNewRolltainer}
-                    className="bg-yellow-600 hover:bg-yellow-500 text-white px-4 py-2 rounded font-bold animate-pulse"
-                  >
-                    Nieuwe Halen
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="mt-2 w-48 h-4 bg-zinc-600 rounded-full mx-auto"></div> {/* Wielen suggestie */}
-          </div>
-
-          {/* ZONE 2: PALLETS (SORTEREN) */}
-          <div className="flex flex-col gap-4">
-            {pallets.map((pallet, index) => {
-              const isFull = pallet.count >= MAX_PALLET_CAPACITY;
-              const fillPercentage = (pallet.count / MAX_PALLET_CAPACITY) * 100;
-
-              return (
-                <div 
-                  key={index}
-                  onDragOver={handleDragOver}
-                  onDrop={(e) => handleDrop(e, 'pallet', index)}
-                  draggable={isFull} // Alleen sleepbaar als hij vol is
-                  onDragStart={(e) => isFull && handleDragStart(e, 'pallet', { index, color: pallet.color })}
-                  className={`relative p-4 rounded-xl border-2 transition-all h-40 flex flex-col justify-between
-                    ${isFull 
-                      ? 'bg-yellow-900/50 border-yellow-400 cursor-grab hover:scale-105 shadow-yellow-500/20 shadow-lg' 
-                      : 'bg-slate-800 border-slate-700'
-                    }`}
-                >
-                  <div className="flex justify-between items-start">
-                    <span className={`font-bold px-2 py-1 rounded text-xs uppercase ${getColorClass(pallet.color)} text-white`}>
-                      {pallet.color} Pallet
-                    </span>
-                    <span className="font-mono text-2xl font-bold">{pallet.count} / {MAX_PALLET_CAPACITY}</span>
-                  </div>
-
-                  {/* Visuele representatie van stapel */}
-                  <div className="flex-1 flex items-end justify-center py-2 gap-1 overflow-hidden">
-                    {/* We tonen een paar 'blokjes' om vulling aan te geven */}
-                    {Array.from({ length: Math.min(10, Math.ceil(pallet.count / 7)) }).map((_, i) => (
-                       <div key={i} className={`w-8 h-8 rounded ${getColorClass(pallet.color)} opacity-80 border border-black/20`}></div>
-                    ))}
-                  </div>
-                  
-                  {/* Progress bar */}
-                  <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden">
-                    <div 
-                      className={`h-full transition-all duration-300 ${isFull ? 'bg-yellow-400' : 'bg-blue-400'}`} 
-                      style={{ width: `${fillPercentage}%` }}
-                    ></div>
-                  </div>
-
-                  {isFull && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-xl backdrop-blur-sm">
-                      <p className="font-bold text-yellow-400 text-lg animate-bounce">SLEEP NAAR TRUCK ➔</p>
-                    </div>
-                  )}
-                  
-                  {/* Houten pallet bodem */}
-                  <div className="h-3 w-full bg-[#8B4513] rounded mt-1 opacity-80"></div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* ZONE 3: UITGAANDE VRACHTWAGEN (EXPEDITIE) */}
-          <div 
-             onDragOver={handleDragOver}
-             onDrop={(e) => handleDrop(e, 'truck')}
-             className="bg-slate-800 border-l-4 border-dashed border-slate-600 p-4 h-full rounded-xl flex flex-col items-center justify-center relative overflow-hidden group"
+              <span className="text-xs text-green-400 font-mono">€{item.price}</span>
+            </button>
+          ))}
+          
+          <div className="h-px bg-slate-600 my-2"></div>
+          
+          <button
+            onClick={() => { setIsMoveMode(!isMoveMode); setSelectedShopItem(null); setMoveSourceIndex(null); }}
+            className={`p-3 rounded border-2 font-bold text-sm transition-all text-center
+                ${isMoveMode ? 'bg-orange-500 border-orange-300 text-white animate-pulse' : 'bg-slate-700 border-slate-600 text-slate-300'}
+            `}
           >
-            <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-10"></div>
-            
-            <h2 className="text-xl font-bold mb-8 z-10">🚛 Expeditie Truck</h2>
-            
-            <div className="w-48 h-64 border-4 border-slate-500 border-t-0 bg-slate-900/50 rounded-b-lg flex items-end justify-center pb-4 relative transition-colors group-hover:bg-slate-700/50">
-                <span className="text-6xl opacity-20">🚚</span>
-                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center w-full px-2">
-                  <p className="text-slate-400 text-sm">Sleep VOLLE pallets (70 stuks) hierheen</p>
+            {isMoveMode ? 'STOP VERPLAATSEN' : '🛠️ VERPLAATSEN'}
+          </button>
+          
+          <div className="mt-4 p-2 bg-black/30 rounded text-xs text-slate-400">
+             <p>💡 <b>Tip:</b> Klik op band/sorter om te draaien.</p>
+             <p className="mt-1">💡 <b>Tip:</b> Klik op het gekleurde stipje om kleur te wijzigen.</p>
+          </div>
+        </div>
+
+        {/* MIDDEN: GRID */}
+        <div className="flex flex-col items-center">
+            {/* INKOMENDE ROLLTAINER (Boven Grid) */}
+            <div className="mb-4 flex gap-2 items-center bg-slate-800 px-4 py-2 rounded-lg border border-slate-600">
+                <span className="text-xs font-bold text-slate-400">INKOMEND:</span>
+                <div className="flex gap-2">
+                    {rolltainer.map((c, i) => (
+                        <div 
+                            key={i} 
+                            draggable={i === 0}
+                            onDragStart={(e) => handleDragStart(e, c)}
+                            className={`w-10 h-10 rounded border-2 shadow-md flex items-center justify-center cursor-grab active:cursor-grabbing
+                                ${getBgColor(c)} ${i===0 ? 'scale-110 border-white z-10' : 'opacity-50 scale-90 border-transparent'}
+                            `}
+                        >
+                            {i===0 && <span className="text-xs">📦</span>}
+                        </div>
+                    ))}
+                    {rolltainer.length === 0 && <span className="text-xs italic text-slate-500">Wachten...</span>}
                 </div>
             </div>
-            
-            <div className="mt-4 bg-zinc-800 w-full p-2 text-center rounded border border-zinc-700">
-               <p className="text-xs text-zinc-400">VOLGENDE VERTREK</p>
-               <p className="text-green-400 font-mono">14:00</p>
-            </div>
-          </div>
 
+            {/* HET SPEELVELD (5x5) */}
+            <div 
+                className="grid grid-cols-5 gap-2 bg-slate-800 p-4 rounded-xl shadow-2xl border-4 border-slate-700"
+                style={{ width: 'fit-content' }}
+            >
+                {grid.map((cell, i) => (
+                    <div
+                        key={i}
+                        onClick={() => handleCellClick(i)}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => handleDrop(e, i)}
+                        className={`w-16 h-16 md:w-20 md:h-20 rounded border-2 relative flex items-center justify-center transition-all
+                            ${!cell ? 'bg-slate-900 border-slate-800 hover:border-slate-600' : 'bg-slate-700 border-slate-500'}
+                            ${isMoveMode && cell ? 'cursor-grab hover:scale-95 border-orange-400' : ''}
+                            ${isMoveMode && !cell && moveSourceIndex !== null ? 'bg-green-900/30 border-green-500 cursor-pointer' : ''}
+                            ${selectedShopItem && !cell ? 'hover:bg-green-900/20 cursor-pointer' : ''}
+                        `}
+                    >
+                        {/* CELL INHOUD */}
+                        {cell && (
+                            <div className="w-full h-full relative">
+                                
+                                {/* CONVEYOR */}
+                                {cell.type === 'conveyor' && (
+                                    <div className={`w-full h-full flex items-center justify-center transition-transform duration-300 ${getRotationClass(cell.rotation)}`}>
+                                        <div className="w-2 h-full bg-slate-500 absolute"></div>
+                                        <div className="text-2xl animate-pulse text-slate-400">⬆</div>
+                                    </div>
+                                )}
+
+                                {/* SORTER */}
+                                {cell.type === 'sorter' && (
+                                    <div className={`w-full h-full relative border-4 border-double border-slate-400 rounded transition-transform duration-300 ${getRotationClass(cell.rotation)}`}>
+                                        {/* Pijlen */}
+                                        <div className="absolute top-0 left-1/2 -translate-x-1/2 text-xs text-slate-400">⬆</div>
+                                        <div className="absolute top-1/2 right-0 -translate-y-1/2 text-xs text-slate-400">➡</div>
+                                        
+                                        {/* Kleur indicator (Klikbaar) */}
+                                        <div 
+                                            onClick={(e) => cycleColor(e, i)}
+                                            className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 rounded-full border-2 border-white shadow-lg cursor-pointer hover:scale-110 z-10 ${getBgColor(cell.color)}`}
+                                            title="Klik om filterkleur te wijzigen"
+                                        ></div>
+                                    </div>
+                                )}
+
+                                {/* PALLET */}
+                                {cell.type === 'pallet' && (
+                                    <div 
+                                        draggable={cell.count! >= MAX_PALLET}
+                                        onDragStart={(e) => handlePalletDragStart(e, i)}
+                                        className="w-full h-full p-1 flex flex-col justify-between"
+                                    >
+                                        <div className="flex justify-between items-center">
+                                            <div onClick={(e) => cycleColor(e, i)} className={`w-4 h-4 rounded-full border cursor-pointer ${getBgColor(cell.color)}`}></div>
+                                            <span className={`text-[10px] font-mono ${cell.count! >= MAX_PALLET ? 'text-green-400 font-bold animate-pulse' : 'text-white'}`}>
+                                                {cell.count}
+                                            </span>
+                                        </div>
+                                        {/* Kratjes visual */}
+                                        <div className="flex flex-wrap gap-0.5 justify-center content-end h-full">
+                                            {Array.from({ length: Math.min(9, Math.ceil((cell.count || 0) / 8)) }).map((_, idx) => (
+                                                <div key={idx} className={`w-3 h-3 rounded-sm ${getBgColor(cell.color)} opacity-80`}></div>
+                                            ))}
+                                        </div>
+                                        <div className="h-1 bg-amber-700 w-full rounded-sm"></div>
+                                    </div>
+                                )}
+
+                                {/* MOVING CRATE (Animatie laag er bovenop) */}
+                                {cell.crate && (
+                                    <div className={`absolute inset-0 flex items-center justify-center z-20 animate-bounce`}>
+                                        <div className={`w-8 h-8 rounded shadow-lg border border-white ${getBgColor(cell.crate)}`}></div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        
+                        {/* Move Mode Highlight */}
+                        {isMoveMode && moveSourceIndex === i && (
+                           <div className="absolute inset-0 bg-orange-500/30 animate-pulse border-2 border-orange-500 z-30 pointer-events-none"></div> 
+                        )}
+                    </div>
+                ))}
+            </div>
         </div>
+
+        {/* RECHTS: VERKOOP TRUCK */}
+        <div 
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleTruckDrop}
+            className="w-32 h-64 border-4 border-dashed border-slate-600 rounded-xl bg-slate-800/50 flex flex-col items-center justify-center text-center p-4 transition-colors hover:bg-slate-700 hover:border-green-500"
+        >
+            <span className="text-4xl mb-2">🚛</span>
+            <span className="text-xs font-bold text-slate-300 uppercase">Verkoop Volle Pallets</span>
+            <div className="mt-4 text-[10px] text-slate-500">Sleep pallet (70st) hierheen</div>
+        </div>
+
       </div>
     </div>
   );
