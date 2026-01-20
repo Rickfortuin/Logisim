@@ -1,65 +1,105 @@
-import Image from "next/image";
+"use client";
+import React, { useState, useEffect } from 'react';
+import { Package, Truck, Warehouse, Play, RefreshCcw } from 'lucide-react';
 
-export default function Home() {
+export default function LogiSim() {
+  const [grid, setGrid] = useState(Array(25).fill(null));
+  const [money, setMoney] = useState(100);
+  const [score, setScore] = useState(0);
+  const [gameActive, setGameActive] = useState(false);
+
+  // Voeg een pakketje toe aan een willekeurige lege plek
+  const addPackage = () => {
+    const emptySlots = grid.map((v, i) => v === null ? i : null).filter(v => v !== null);
+    
+    if (emptySlots.length === 0) {
+      alert("Magazijn vol! Game Over.");
+      resetGame();
+      return;
+    }
+
+    const randomSlot = emptySlots[Math.floor(Math.random() * emptySlots.length)];
+    const newGrid = [...grid];
+    newGrid[randomSlot] = { id: Date.now(), type: 'standard' };
+    setGrid(newGrid);
+  };
+
+  // Verwerk (verwijder) een pakketje
+  const processPackage = (index: number) => {
+    if (!gameActive || grid[index] === null) return;
+    
+    const newGrid = [...grid];
+    newGrid[index] = null;
+    setGrid(newGrid);
+    setMoney(m => m + 15);
+    setScore(s => s + 1);
+  };
+
+  const resetGame = () => {
+    setGrid(Array(25).fill(null));
+    setMoney(100);
+    setScore(0);
+    setGameActive(false);
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center font-sans">
+      <h1 className="text-4xl font-bold mb-4 flex items-center gap-2">
+        <Warehouse className="text-blue-400" /> LogiSim 2D
+      </h1>
+
+      <div className="flex gap-8 mb-6 bg-slate-800 p-4 rounded-xl border border-slate-700">
+        <div className="text-center">
+          <p className="text-slate-400 text-sm">Budget</p>
+          <p className="text-2xl font-mono text-green-400">€{money}</p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="text-center">
+          <p className="text-slate-400 text-sm">Verwerkt</p>
+          <p className="text-2xl font-mono text-blue-400">{score}</p>
         </div>
-      </main>
+      </div>
+
+      <div className="grid grid-cols-5 gap-2 bg-slate-700 p-3 rounded-lg shadow-2xl">
+        {grid.map((cell, i) => (
+          <div
+            key={i}
+            onClick={() => processPackage(i)}
+            className={`w-16 h-16 sm:w-24 sm:h-24 border-2 rounded-md flex items-center justify-center transition-all cursor-pointer
+              ${cell ? 'bg-orange-500 border-orange-300 hover:scale-95' : 'bg-slate-800 border-slate-600 hover:bg-slate-750'}`}
+          >
+            {cell && <Package size={40} className="text-white animate-bounce" />}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-8 flex gap-4">
+        {!gameActive ? (
+          <button 
+            onClick={() => setGameActive(true)}
+            className="bg-blue-600 hover:bg-blue-500 px-6 py-3 rounded-full font-bold flex items-center gap-2 transition"
+          >
+            <Play size={20} /> Start Operatie
+          </button>
+        ) : (
+          <button 
+            onClick={addPackage}
+            className="bg-green-600 hover:bg-green-500 px-6 py-3 rounded-full font-bold flex items-center gap-2 transition"
+          >
+            <Truck size={20} /> Inkomende Zending (€10 kosten)
+          </button>
+        )}
+        
+        <button 
+          onClick={resetGame}
+          className="bg-slate-700 hover:bg-slate-600 p-3 rounded-full transition"
+        >
+          <RefreshCcw size={20} />
+        </button>
+      </div>
+
+      <p className="mt-6 text-slate-400 text-sm">
+        Klik op een pakketje om het te verzenden en geld te verdienen!
+      </p>
     </div>
   );
 }
