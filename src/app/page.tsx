@@ -150,10 +150,10 @@ export default function WarenhuisSim() {
           if (cell && (cell.type === 'conveyor' || cell.type === 'sorter') && cell.crate) {
             let targetIndex: number | null = null;
             if (cell.type === 'conveyor') {
-              targetIndex = getNeighborIndex(i, cell.rotation);
+              targetIndex = getNeighborIndex(i, cell.rotation!);
             } else if (cell.type === 'sorter') {
               if (cell.crate === cell.color) {
-                targetIndex = getNeighborIndex(i, cell.rotation);
+                targetIndex = getNeighborIndex(i, cell.rotation!);
               } else {
                 targetIndex = getNeighborIndex(i, (cell.rotation! + 1) % 4);
               }
