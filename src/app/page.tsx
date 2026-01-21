@@ -6,9 +6,11 @@ import React, { useState, useEffect, useCallback } from 'react';
 const COLORS = ['red', 'blue', 'green', 'purple'];
 const MAX_PALLET = 10;
 const GRID_SIZE = 8;
-const TICK_SPEED = 800;
+const CELL_SIZE = 64; // pixels per grid cell
+const PLAYER_SIZE = 32; // player size in pixels
+const PLAYER_SPEED = 3;
 
-type StructureType = 'pallet' | 'conveyor' | 'sorter' | 'rolltainer' | 'cobot' | 'orderdesk';
+type StructureType = 'pallet' | 'conveyor' | 'sorter' | 'rolltainer' | 'cobot' | 'orderdesk' | 'truck';
 type Direction = 'up' | 'down' | 'left' | 'right';
 
 interface GridCell {
@@ -18,14 +20,15 @@ interface GridCell {
   count?: number;
   rotation?: number;
   crate?: string | null;
+  x: number; // grid x position
+  y: number; // grid y position
 }
 
 interface Player {
-  x: number;
-  y: number;
-  direction: Direction;
+  x: number; // pixel position
+  y: number; // pixel position
+  angle: number; // rotation in degrees
   carrying: string | null; // color of carried item
-  speed: number;
 }
 
 interface Order {
@@ -45,7 +48,6 @@ interface ShopItem {
   desc: string;
 }
 
-// Stad adressen voor orders
 const ADDRESSES = [
   'Havenstraat 15', 'Marktplein 8', 'Industrieweg 42', 'Kanaaldijk 3',
   'Dorpsstraat 27', 'Grachtweg 12', 'Winkelcentrum 5', 'Laan van Europa 33'
@@ -57,26 +59,31 @@ const SHOP_ITEMS: ShopItem[] = [
   { type: 'pallet', price: 150, label: 'Opslagpallet', icon: '📦', desc: 'Opslag voor orders' },
   { type: 'cobot', price: 400, label: 'Robotarm', icon: '🦾', desc: 'Automatische handling' },
   { type: 'orderdesk', price: 200, label: 'Order Station', icon: '📋', desc: 'Genereert nieuwe orders' },
+  { type: 'truck', price: 500, label: 'Laad-dock', icon: '🚛', desc: 'Voor snelle leveringen' },
 ];
 
 export default function WarehouseGame() {
   // --- STATES ---
-  const [grid, setGrid] = useState<(GridCell | null)[]>(() => {
-    const initial = Array(GRID_SIZE * GRID_SIZE).fill(null);
-    // Start met een paar basis elementen
-    initial[0] = { id: 'desk1', type: 'orderdesk' };
-    initial[3] = { id: 'roll1', type: 'rolltainer', crate: null };
-    initial[4] = { id: 'roll2', type: 'rolltainer', crate: null };
-    initial[10] = { id: 'conv1', type: 'conveyor', rotation: 1 };
+  const [grid, setGrid] = useState<GridCell[]>(() => {
+    const initial: GridCell[] = [];
+    // Order desk in de hoek
+    initial.push({ id: 'desk1', type: 'orderdesk', x: 0, y: 0 });
+    
+    // Een paar rolltainers
+    initial.push({ id: 'roll1', type: 'rolltainer', x: 2, y: 2, crate: null });
+    initial.push({ id: 'roll2', type: 'rolltainer', x: 5, y: 2, crate: null });
+    
+    // Een transportband
+    initial.push({ id: 'conv1', type: 'conveyor', x: 3, y: 3, rotation: 1 });
+    
     return initial;
   });
   
   const [player, setPlayer] = useState<Player>({
-    x: 2,
-    y: 2,
-    direction: 'right',
+    x: CELL_SIZE * 2,
+    y: CELL_SIZE * 5,
+    angle: 90, // Kijkt naar boven
     carrying: null,
-    speed: 300
   });
   
   const [money, setMoney] = useState(1500);
@@ -93,99 +100,162 @@ export default function WarehouseGame() {
   ]);
   
   const [selectedShopItem, setSelectedShopItem] = useState<StructureType | null>(null);
-  const [moveSourceIndex, setMoveSourceIndex] = useState<number | null>(null);
-  const [isMoveMode, setIsMoveMode] = useState(false);
+  const [showGrid, setShowGrid] = useState(false);
+  const [keysPressed, setKeysPressed] = useState<{ [key: string]: boolean }>({});
   const [activeOrder, setActiveOrder] = useState<string | null>('order1');
   const [gameSpeed, setGameSpeed] = useState(1);
 
   const uid = () => Math.random().toString(36).substr(2, 9);
 
-  // --- PLAYER CONTROLS ---
-  const movePlayer = useCallback((dx: number, dy: number) => {
-    setPlayer(prev => {
-      const newX = Math.max(0, Math.min(GRID_SIZE - 1, prev.x + dx));
-      const newY = Math.max(0, Math.min(GRID_SIZE - 1, prev.y + dy));
-      
-      // Update direction
-      let newDirection = prev.direction;
-      if (dx > 0) newDirection = 'right';
-      if (dx < 0) newDirection = 'left';
-      if (dy > 0) newDirection = 'down';
-      if (dy < 0) newDirection = 'up';
-      
-      return {
-        ...prev,
-        x: newX,
-        y: newY,
-        direction: newDirection
-      };
-    });
-  }, []);
+  // --- COLLISION DETECTION ---
+  const checkCollision = (px: number, py: number) => {
+    // Bounds collision
+    if (px < 0 || px > GRID_SIZE * CELL_SIZE - PLAYER_SIZE / 2 ||
+        py < 0 || py > GRID_SIZE * CELL_SIZE - PLAYER_SIZE / 2) {
+      return true;
+    }
+    
+    // Grid object collision
+    const playerGridX = Math.floor(px / CELL_SIZE);
+    const playerGridY = Math.floor(py / CELL_SIZE);
+    
+    // Check if any grid object occupies this cell
+    for (const cell of grid) {
+      if (cell.x === playerGridX && cell.y === playerGridY) {
+        // Allow walking over conveyors and sorters but not other objects
+        if (cell.type === 'conveyor' || cell.type === 'sorter') {
+          return false;
+        }
+        return true;
+      }
+    }
+    
+    return false;
+  };
 
-  // Keyboard controls
+  // --- PLAYER MOVEMENT ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'w' || e.key === 'ArrowUp') movePlayer(0, -1);
-      if (e.key === 's' || e.key === 'ArrowDown') movePlayer(0, 1);
-      if (e.key === 'a' || e.key === 'ArrowLeft') movePlayer(-1, 0);
-      if (e.key === 'd' || e.key === 'ArrowRight') movePlayer(1, 0);
+      if (['w', 'a', 's', 'd', 'e', 'v'].includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        setKeysPressed(prev => ({ ...prev, [e.key.toLowerCase()]: true }));
+      }
+    };
+    
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (['w', 'a', 's', 'd', 'e', 'v'].includes(e.key.toLowerCase())) {
+        setKeysPressed(prev => ({ ...prev, [e.key.toLowerCase()]: false }));
+      }
       
-      // Interactie met spatie
-      if (e.key === ' ') {
+      // E key for interaction
+      if (e.key.toLowerCase() === 'e') {
         handlePlayerInteract();
       }
       
-      // Cancel acties met Escape
+      // V key to toggle grid
+      if (e.key.toLowerCase() === 'v') {
+        setShowGrid(prev => !prev);
+      }
+      
+      // Escape to cancel shop selection
       if (e.key === 'Escape') {
         setSelectedShopItem(null);
-        setIsMoveMode(false);
-        setMoveSourceIndex(null);
       }
     };
     
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [movePlayer]);
-
-  // --- GAME LOGICA ---
-  const getNeighborIndex = (index: number, direction: number) => {
-    const row = Math.floor(index / GRID_SIZE);
-    const col = index % GRID_SIZE;
-    let nextRow = row; let nextCol = col;
-    if (direction === 0) nextRow--; // up
-    if (direction === 1) nextCol++; // right
-    if (direction === 2) nextRow++; // down
-    if (direction === 3) nextCol--; // left
-    if (nextRow < 0 || nextRow >= GRID_SIZE || nextCol < 0 || nextCol >= GRID_SIZE) return null;
-    return nextRow * GRID_SIZE + nextCol;
-  };
-
-  const playerIndex = player.y * GRID_SIZE + player.x;
-
-  // Player interactie
-  const handlePlayerInteract = () => {
-    const cell = grid[playerIndex];
+    window.addEventListener('keyup', handleKeyUp);
     
-    // Orderdesk - accepteer nieuwe order
-    if (cell?.type === 'orderdesk') {
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
+  // Game loop for player movement
+  useEffect(() => {
+    const gameLoop = setInterval(() => {
+      setPlayer(prev => {
+        let newX = prev.x;
+        let newY = prev.y;
+        let newAngle = prev.angle;
+        
+        // Rotation
+        if (keysPressed['a']) {
+          newAngle = (prev.angle - 5) % 360;
+        }
+        if (keysPressed['d']) {
+          newAngle = (prev.angle + 5) % 360;
+        }
+        
+        // Movement
+        let moveX = 0;
+        let moveY = 0;
+        
+        if (keysPressed['w']) {
+          const rad = newAngle * Math.PI / 180;
+          moveX = Math.sin(rad) * PLAYER_SPEED;
+          moveY = -Math.cos(rad) * PLAYER_SPEED;
+        }
+        if (keysPressed['s']) {
+          const rad = newAngle * Math.PI / 180;
+          moveX = -Math.sin(rad) * PLAYER_SPEED;
+          moveY = Math.cos(rad) * PLAYER_SPEED;
+        }
+        
+        // Check collision for new position
+        const potentialX = prev.x + moveX;
+        const potentialY = prev.y + moveY;
+        
+        if (!checkCollision(potentialX, potentialY)) {
+          newX = potentialX;
+          newY = potentialY;
+        } else {
+          // Try moving only in X or Y direction
+          if (!checkCollision(potentialX, prev.y)) {
+            newX = potentialX;
+          }
+          if (!checkCollision(prev.x, potentialY)) {
+            newY = potentialY;
+          }
+        }
+        
+        return { ...prev, x: newX, y: newY, angle: newAngle };
+      });
+    }, 16); // ~60 FPS
+    
+    return () => clearInterval(gameLoop);
+  }, [keysPressed]);
+
+  // --- PLAYER INTERACTION ---
+  const handlePlayerInteract = () => {
+    const playerGridX = Math.floor(player.x / CELL_SIZE);
+    const playerGridY = Math.floor(player.y / CELL_SIZE);
+    
+    // Find cell at player's position
+    const cell = grid.find(c => c.x === playerGridX && c.y === playerGridY);
+    
+    if (!cell) return;
+    
+    // Orderdesk - accept new order
+    if (cell.type === 'orderdesk') {
       generateNewOrder();
       return;
     }
     
-    // Rolltainer - pak pakket
-    if (cell?.type === 'rolltainer' && cell.crate && !player.carrying) {
+    // Rolltainer - pick up crate
+    if (cell.type === 'rolltainer' && cell.crate && !player.carrying) {
       setPlayer(prev => ({ ...prev, carrying: cell.crate ?? null }));
-      const newGrid = [...grid];
-      newGrid[playerIndex] = { ...cell, crate: null };
-      setGrid(newGrid);
+      setGrid(prev => prev.map(c => 
+        c.id === cell.id ? { ...c, crate: null } : c
+      ));
       return;
     }
     
-    // Pallet - plaats pakket voor order
-    if (cell?.type === 'pallet' && player.carrying && activeOrder) {
+    // Pallet - place crate for order
+    if (cell.type === 'pallet' && player.carrying && activeOrder) {
       const order = orders.find(o => o.id === activeOrder);
       if (order && cell.color === player.carrying) {
-        // Check of deze kleur nodig is voor de order
         const neededItem = order.items.find(item => item.color === player.carrying);
         if (neededItem && (order.collectedItems[player.carrying] || 0) < neededItem.quantity) {
           // Update collected items
@@ -200,37 +270,23 @@ export default function WarehouseGame() {
           setOrders(updatedOrders);
           
           // Update pallet count
-          const newGrid = [...grid];
-          newGrid[playerIndex] = { 
-            ...cell, 
-            count: (cell.count || 0) + 1 
-          };
-          setGrid(newGrid);
+          setGrid(prev => prev.map(c => 
+            c.id === cell.id ? { ...c, count: (c.count || 0) + 1 } : c
+          ));
           
           setPlayer(prev => ({ ...prev, carrying: null }));
-          
-          // Check of order compleet is
           checkOrderComplete(activeOrder, updatedOrders);
         }
       }
       return;
     }
     
-    // Conveyor/Sorter - plaats pakket
-    if ((cell?.type === 'conveyor' || cell?.type === 'sorter') && player.carrying && !cell.crate) {
-      const newGrid = [...grid];
-      newGrid[playerIndex] = { ...cell, crate: player.carrying };
-      setGrid(newGrid);
-      setPlayer(prev => ({ ...prev, carrying: null }));
-      return;
-    }
-    
-    // Pak pakket van conveyor/sorter
-    if ((cell?.type === 'conveyor' || cell?.type === 'sorter') && cell.crate && !player.carrying) {
-      setPlayer(prev => ({ ...prev, carrying: cell.crate ?? null }));
-      const newGrid = [...grid];
-      newGrid[playerIndex] = { ...cell, crate: null };
-      setGrid(newGrid);
+    // Truck - deliver order
+    if (cell.type === 'truck' && activeOrder) {
+      const order = orders.find(o => o.id === activeOrder);
+      if (order && order.status === 'delivering') {
+        deliverOrder(order.id);
+      }
       return;
     }
   };
@@ -266,24 +322,18 @@ export default function WarehouseGame() {
       ));
       setMoney(m => m + order.reward);
       setScore(s => s + 1);
-      
-      // Reset pallets voor deze order
-      setGrid(prev => prev.map(cell => {
-        if (cell?.type === 'pallet' && cell.color && order.items.some(item => item.color === cell.color)) {
-          return { ...cell, count: 0 };
-        }
-        return cell;
-      }));
     }
   };
 
   const deliverOrder = (orderId: string) => {
+    const order = orders.find(o => o.id === orderId);
+    if (!order) return;
+    
     setOrders(prev => prev.map(o => 
       o.id === orderId ? { ...o, status: 'completed' } : o
     ));
     
-    // Bonus voor snelle levering
-    setMoney(m => m + 100);
+    setMoney(m => m + 100); // Delivery bonus
     setActiveOrder(null);
   };
 
@@ -291,13 +341,12 @@ export default function WarehouseGame() {
   useEffect(() => {
     const interval = setInterval(() => {
       setGrid((currentGrid) => {
-        const nextGrid = JSON.parse(JSON.stringify(currentGrid));
+        const nextGrid = [...currentGrid];
         let changed = false;
 
-        // Rolltainers genereren pakketten
-        for (let i = 0; i < currentGrid.length; i++) {
-          const cell = nextGrid[i];
-          if (cell && cell.type === 'rolltainer' && !cell.crate) {
+        // Rolltainers generate packages
+        for (const cell of nextGrid) {
+          if (cell.type === 'rolltainer' && !cell.crate) {
             if (Math.random() > 0.7) {
               cell.crate = COLORS[Math.floor(Math.random() * COLORS.length)];
               changed = true;
@@ -305,154 +354,152 @@ export default function WarehouseGame() {
           }
         }
 
-        // Cobot logica
-        for (let i = 0; i < currentGrid.length; i++) {
-          const cobot = currentGrid[i];
-          if (cobot && cobot.type === 'cobot') {
-            const isVertical = cobot.rotation === 0 || cobot.rotation === 2;
-            const sideA = getNeighborIndex(i, isVertical ? 0 : 3);
-            const sideB = getNeighborIndex(i, isVertical ? 2 : 1);
-            const idxs = [sideA, sideB];
-            let sourceIdx = -1; let targetIdx = -1;
-
-            if (idxs[0] !== null && nextGrid[idxs[0]]?.type === 'rolltainer' && nextGrid[idxs[0]]?.crate) sourceIdx = idxs[0]!;
-            else if (idxs[1] !== null && nextGrid[idxs[1]]?.type === 'rolltainer' && nextGrid[idxs[1]]?.crate) sourceIdx = idxs[1]!;
-
-            if (sourceIdx !== -1) {
-              const potentialTarget = sourceIdx === idxs[0] ? idxs[1] : idxs[0];
-              if (potentialTarget !== null) {
-                const targetCell = nextGrid[potentialTarget];
-                if (targetCell && targetCell.type === 'conveyor' && !targetCell.crate) {
-                  targetIdx = potentialTarget;
-                }
-              }
+        // Cobot automation
+        for (const cobot of nextGrid.filter(c => c.type === 'cobot')) {
+          const isVertical = cobot.rotation === 0 || cobot.rotation === 2;
+          const directions = isVertical ? [
+            { x: cobot.x, y: cobot.y - 1 }, // up
+            { x: cobot.x, y: cobot.y + 1 }  // down
+          ] : [
+            { x: cobot.x - 1, y: cobot.y }, // left
+            { x: cobot.x + 1, y: cobot.y }  // right
+          ];
+          
+          let sourceCell: GridCell | null = null;
+          let targetCell: GridCell | null = null;
+          
+          for (const dir of directions) {
+            const neighbor = nextGrid.find(c => c.x === dir.x && c.y === dir.y);
+            if (neighbor?.type === 'rolltainer' && neighbor.crate) {
+              sourceCell = neighbor;
+            } else if (neighbor?.type === 'conveyor' && !neighbor.crate) {
+              targetCell = neighbor;
             }
-            if (sourceIdx !== -1 && targetIdx !== -1) {
-              nextGrid[targetIdx].crate = nextGrid[sourceIdx].crate;
-              nextGrid[sourceIdx].crate = null;
-              changed = true;
-            }
+          }
+          
+          if (sourceCell && targetCell) {
+            targetCell.crate = sourceCell.crate;
+            sourceCell.crate = null;
+            changed = true;
           }
         }
 
-        // Conveyor en sorter automatische beweging
-        for (let i = 0; i < currentGrid.length; i++) {
-          const cell = currentGrid[i];
-          if (cell && (cell.type === 'conveyor' || cell.type === 'sorter') && cell.crate) {
-            let targetIndex: number | null = null;
+        // Conveyor and sorter movement
+        for (const cell of nextGrid) {
+          if ((cell.type === 'conveyor' || cell.type === 'sorter') && cell.crate) {
+            let targetX = cell.x;
+            let targetY = cell.y;
+            
             if (cell.type === 'conveyor') {
-              targetIndex = getNeighborIndex(i, cell.rotation || 1);
+              switch (cell.rotation) {
+                case 0: targetY--; break; // up
+                case 1: targetX++; break; // right
+                case 2: targetY++; break; // down
+                case 3: targetX--; break; // left
+              }
             } else if (cell.type === 'sorter') {
               if (cell.crate === cell.color) {
-                targetIndex = getNeighborIndex(i, cell.rotation || 0);
+                // Go to correct output
+                switch (cell.rotation) {
+                  case 0: targetY--; break;
+                  case 1: targetX++; break;
+                  case 2: targetY++; break;
+                  case 3: targetX--; break;
+                }
               } else {
-                targetIndex = getNeighborIndex(i, (cell.rotation! + 1) % 4);
+                // Go to reject output
+                switch (cell.rotation) {
+                  case 0: targetX++; break;
+                  case 1: targetY++; break;
+                  case 2: targetX--; break;
+                  case 3: targetY--; break;
+                }
               }
             }
-            if (targetIndex !== null && targetIndex >= 0) {
-              const targetCell = nextGrid[targetIndex];
-              if (targetCell && targetCell.type === 'pallet') {
-                if (targetCell.color === cell.crate && targetCell.count! < MAX_PALLET) {
-                  targetCell.count!++;
-                  nextGrid[i].crate = null;
-                  changed = true;
-                }
-              }
-              else if (targetCell && (targetCell.type === 'conveyor' || targetCell.type === 'sorter')) {
-                if (!targetCell.crate) {
-                  targetCell.crate = cell.crate;
-                  nextGrid[i].crate = null;
-                  changed = true;
-                }
+            
+            const targetCell = nextGrid.find(c => c.x === targetX && c.y === targetY);
+            
+            if (targetCell) {
+              if (targetCell.type === 'pallet' && targetCell.color === cell.crate && (targetCell.count || 0) < MAX_PALLET) {
+                targetCell.count = (targetCell.count || 0) + 1;
+                cell.crate = null;
+                changed = true;
+              } else if ((targetCell.type === 'conveyor' || targetCell.type === 'sorter') && !targetCell.crate) {
+                targetCell.crate = cell.crate;
+                cell.crate = null;
+                changed = true;
               }
             }
           }
         }
+        
         return changed ? nextGrid : currentGrid;
       });
-    }, TICK_SPEED / gameSpeed);
+    }, 800 / gameSpeed);
+    
     return () => clearInterval(interval);
   }, [gameSpeed]);
 
-  // --- GRID INTERACTIE ---
-  const handleCellClick = (index: number) => {
-    const cell = grid[index];
+  // --- GRID PLACEMENT ---
+  const handleGridClick = (gridX: number, gridY: number) => {
+    // Check if player can reach this cell (adjacent)
+    const playerGridX = Math.floor(player.x / CELL_SIZE);
+    const playerGridY = Math.floor(player.y / CELL_SIZE);
+    const distance = Math.abs(playerGridX - gridX) + Math.abs(playerGridY - gridY);
     
-    // Niet klikken als speler erop staat
-    if (index === playerIndex) return;
-    
-    if (isMoveMode) {
-      if (moveSourceIndex === null) {
-        if (cell) setMoveSourceIndex(index);
-      } else {
-        const newGrid = [...grid];
-        const temp = newGrid[moveSourceIndex];
-        newGrid[moveSourceIndex] = newGrid[index];
-        newGrid[index] = temp;
-        setGrid(newGrid);
-        setMoveSourceIndex(null);
-        setIsMoveMode(false);
-      }
+    if (distance > 2) {
+      alert('Te ver weg! Loop dichterbij.');
       return;
     }
-
+    
+    const existingCell = grid.find(c => c.x === gridX && c.y === gridY);
+    
     if (selectedShopItem) {
-      if (!cell) {
+      if (!existingCell) {
         const item = SHOP_ITEMS.find(i => i.type === selectedShopItem);
         if (item && money >= item.price) {
-          const newGrid = [...grid];
-          newGrid[index] = {
+          const newCell: GridCell = {
             id: uid(),
             type: selectedShopItem,
+            x: gridX,
+            y: gridY,
             rotation: (selectedShopItem === 'cobot') ? 0 : 1,
             color: (selectedShopItem === 'pallet' || selectedShopItem === 'sorter') ? COLORS[0] : undefined,
             count: 0,
             crate: null
           };
-          setGrid(newGrid);
+          setGrid(prev => [...prev, newCell]);
           setMoney(m => m - item.price);
           setSelectedShopItem(null);
         }
       }
       return;
     }
-
-    if (cell) {
-      const newGrid = [...grid];
-      if (cell.type === 'cobot') {
-        newGrid[index] = { ...cell, rotation: cell.rotation === 0 ? 1 : 0 };
-        setGrid(newGrid);
-        return;
-      }
-      if (cell.type === 'conveyor' || cell.type === 'sorter') {
-        newGrid[index] = { ...cell, rotation: (cell.rotation! + 1) % 4 };
-        setGrid(newGrid);
+    
+    if (existingCell) {
+      // Rotate conveyor/sorter/cobot
+      if (existingCell.type === 'cobot' || existingCell.type === 'conveyor' || existingCell.type === 'sorter') {
+        setGrid(prev => prev.map(c => 
+          c.id === existingCell.id 
+            ? { ...c, rotation: ((c.rotation || 0) + 1) % 4 } 
+            : c
+        ));
       }
     }
   };
 
-  const cycleColor = (e: React.MouseEvent, index: number) => {
-    e.stopPropagation();
-    const cell = grid[index];
+  const cycleColor = (cellId: string) => {
+    const cell = grid.find(c => c.id === cellId);
     if (cell && (cell.type === 'sorter' || cell.type === 'pallet')) {
-      const newGrid = [...grid];
       const currentColorIdx = COLORS.indexOf(cell.color || COLORS[0]);
-      newGrid[index] = { ...cell, color: COLORS[(currentColorIdx + 1) % COLORS.length] };
-      setGrid(newGrid);
+      const newColor = COLORS[(currentColorIdx + 1) % COLORS.length];
+      setGrid(prev => prev.map(c => 
+        c.id === cellId ? { ...c, color: newColor } : c
+      ));
     }
   };
 
   // --- VISUAL HELPERS ---
-  const getRotationClass = (rot: number = 0) => {
-    switch (rot) {
-      case 0: return 'rotate-0';
-      case 1: return 'rotate-90';
-      case 2: return 'rotate-180';
-      case 3: return '-rotate-90';
-      default: return '';
-    }
-  };
-
   const getBgColor = (c?: string) => {
     if (c === 'red') return 'bg-red-500';
     if (c === 'blue') return 'bg-blue-500';
@@ -461,40 +508,22 @@ export default function WarehouseGame() {
     return 'bg-gray-500';
   };
 
-  const getTextColor = (c?: string) => {
-    if (c === 'red') return 'text-red-500';
-    if (c === 'blue') return 'text-blue-500';
-    if (c === 'green') return 'text-green-500';
-    if (c === 'purple') return 'text-purple-500';
-    return 'text-neutral-400';
-  };
-
-  const getPlayerDirectionChar = (dir: Direction) => {
-    switch (dir) {
-      case 'up': return '▲';
-      case 'down': return '▼';
-      case 'left': return '◀';
-      case 'right': return '▶';
-    }
-  };
-
-  // --- UI RENDERING ---
   return (
-    <div className="min-h-screen bg-neutral-900 text-white font-sans p-4 flex flex-col items-center select-none">
+    <div className="min-h-screen bg-gradient-to-b from-neutral-900 to-gray-900 text-white font-sans p-4 flex flex-col items-center select-none">
       {/* HEADER */}
-      <div className="w-full max-w-7xl flex justify-between items-center bg-neutral-800 p-4 rounded-xl border-b-4 border-neutral-700 mb-4 sticky top-0 z-20 shadow-lg">
+      <div className="w-full max-w-7xl flex justify-between items-center bg-neutral-800 p-4 rounded-xl border-2 border-neutral-700 mb-4 shadow-xl">
         <div>
-          <h1 className="text-xl font-black text-orange-500">WAREHOUSE MANAGER</h1>
-          <p className="text-xs text-neutral-400">Handmatig besturen + Automatiseren</p>
+          <h1 className="text-2xl font-black text-orange-500">WAREHOUSE SIMULATOR PRO</h1>
+          <p className="text-sm text-neutral-400">Pixel-based movement • Automatisering • Order Management</p>
         </div>
         <div className="flex gap-6 items-center">
           <div className="text-right">
-            <span className="block text-[10px] text-neutral-400">GELD</span>
-            <span className="text-2xl font-mono text-green-400">€{money}</span>
+            <span className="block text-xs text-neutral-400">GELD</span>
+            <span className="text-3xl font-mono text-green-400">€{money}</span>
           </div>
           <div className="text-right">
-            <span className="block text-[10px] text-neutral-400">ORDERS</span>
-            <span className="text-2xl font-mono text-blue-400">{score}</span>
+            <span className="block text-xs text-neutral-400">SCORE</span>
+            <span className="text-3xl font-mono text-blue-400">{score}</span>
           </div>
           <div className="flex gap-2">
             <button
@@ -522,48 +551,88 @@ export default function WarehouseGame() {
       {/* MAIN CONTENT */}
       <div className="flex flex-col lg:flex-row gap-6 w-full max-w-7xl">
         
-        {/* LINKERKANT - PLAYER & CONTROLS */}
+        {/* LINKERKANT - CONTROLS & ORDERS */}
         <div className="flex flex-col gap-4 w-full lg:w-80">
-          {/* PLAYER INFO */}
-          <div className="bg-neutral-800 p-4 rounded-xl border border-neutral-700">
-            <div className="flex justify-between items-center mb-3">
-              <h2 className="font-bold text-neutral-300">JIJ</h2>
-              <div className={`px-2 py-1 rounded text-xs ${player.carrying ? 'bg-green-600' : 'bg-neutral-700'}`}>
-                {player.carrying ? `Draagt: ${player.carrying}` : 'Leeg'}
-              </div>
-            </div>
+          {/* PLAYER CONTROLS */}
+          <div className="bg-neutral-800 p-4 rounded-xl border-2 border-neutral-700 shadow-lg">
+            <h2 className="font-bold text-neutral-300 mb-3 text-lg">👤 BESTURING</h2>
             
-            <div className="flex items-center gap-4 mb-4">
-              <div className="text-4xl">
-                {getPlayerDirectionChar(player.direction)}
+            <div className="flex items-center gap-4 mb-4 p-3 bg-neutral-900 rounded-lg">
+              <div className="relative">
+                <div className="w-16 h-16 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center shadow-xl">
+                  <div 
+                    className="w-4 h-4 bg-white rounded-full"
+                    style={{
+                      transform: `translate(${Math.sin(player.angle * Math.PI / 180) * 20}px, ${-Math.cos(player.angle * Math.PI / 180) * 20}px)`
+                    }}
+                  />
+                </div>
+                {player.carrying && (
+                  <div className={`absolute -top-2 -right-2 w-6 h-6 rounded-full border-2 border-white ${getBgColor(player.carrying)}`}></div>
+                )}
               </div>
               <div>
-                <div className="text-sm">Positie: ({player.x}, {player.y})</div>
-                <div className="text-xs text-neutral-400">Gebruik WASD of pijltjes</div>
+                <div className="text-sm">Positie: ({Math.floor(player.x / CELL_SIZE)}, {Math.floor(player.y / CELL_SIZE)})</div>
+                <div className={`text-xs ${player.carrying ? 'text-green-400' : 'text-neutral-400'}`}>
+                  {player.carrying ? `Draagt: ${player.carrying}` : 'Geen item'}
+                </div>
               </div>
             </div>
             
-            <div className="space-y-2 text-sm">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-green-500"></div>
-                <span>SPATIE - Interact met object</span>
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              <div className="col-start-2">
+                <div className="text-center text-xs text-neutral-400 mb-1">W</div>
+                <div className="w-12 h-12 bg-neutral-700 rounded-lg flex items-center justify-center mx-auto">
+                  <div className="transform -rotate-90">↑</div>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-blue-500"></div>
-                <span>ESC - Cancel actie</span>
+              <div>
+                <div className="text-center text-xs text-neutral-400 mb-1">A</div>
+                <div className="w-12 h-12 bg-neutral-700 rounded-lg flex items-center justify-center mx-auto">
+                  ←
+                </div>
               </div>
+              <div>
+                <div className="text-center text-xs text-neutral-400 mb-1">S</div>
+                <div className="w-12 h-12 bg-neutral-700 rounded-lg flex items-center justify-center mx-auto">
+                  ↓
+                </div>
+              </div>
+              <div>
+                <div className="text-center text-xs text-neutral-400 mb-1">D</div>
+                <div className="w-12 h-12 bg-neutral-700 rounded-lg flex items-center justify-center mx-auto">
+                  →
+                </div>
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-2">
+              <button 
+                onClick={handlePlayerInteract}
+                className="p-3 bg-green-600 hover:bg-green-700 rounded-lg font-bold flex items-center justify-center gap-2"
+              >
+                <span className="text-xl">E</span>
+                <span className="text-sm">Interact</span>
+              </button>
+              <button 
+                onClick={() => setShowGrid(!showGrid)}
+                className="p-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-bold flex items-center justify-center gap-2"
+              >
+                <span className="text-xl">V</span>
+                <span className="text-sm">{showGrid ? 'Hide Grid' : 'Show Grid'}</span>
+              </button>
             </div>
           </div>
 
-          {/* ORDERS */}
-          <div className="bg-neutral-800 p-4 rounded-xl border border-neutral-700 flex-1">
+          {/* ACTIVE ORDERS */}
+          <div className="bg-neutral-800 p-4 rounded-xl border-2 border-neutral-700 shadow-lg flex-1">
             <div className="flex justify-between items-center mb-3">
-              <h2 className="font-bold text-neutral-300">ACTIEVE ORDERS</h2>
+              <h2 className="font-bold text-neutral-300 text-lg">📋 ORDERS</h2>
               <button
                 onClick={generateNewOrder}
-                className="text-xs bg-green-600 hover:bg-green-700 px-2 py-1 rounded transition-colors"
+                className="text-xs bg-green-600 hover:bg-green-700 px-3 py-1 rounded transition-colors"
               >
-                + Nieuwe
+                + Nieuw
               </button>
             </div>
             
@@ -571,12 +640,12 @@ export default function WarehouseGame() {
               {orders.filter(o => o.status !== 'completed').map((order) => (
                 <div
                   key={order.id}
-                  className={`p-3 rounded-lg border ${order.id === activeOrder ? 'border-orange-500 bg-neutral-700' : 'border-neutral-600 bg-neutral-800/50'}`}
+                  className={`p-3 rounded-lg border-2 ${order.id === activeOrder ? 'border-orange-500 bg-neutral-700' : 'border-neutral-600 bg-neutral-800/50'}`}
                   onClick={() => setActiveOrder(order.id)}
                 >
                   <div className="flex justify-between items-start mb-2">
                     <div>
-                      <div className="font-medium text-sm">Naar: {order.address}</div>
+                      <div className="font-medium text-sm">{order.address}</div>
                       <div className="text-xs text-neutral-400">€{order.reward}</div>
                     </div>
                     <div className={`text-xs px-2 py-1 rounded ${
@@ -589,7 +658,7 @@ export default function WarehouseGame() {
                     </div>
                   </div>
                   
-                  <div className="space-y-1">
+                  <div className="space-y-1 mb-2">
                     {order.items.map((item, idx) => (
                       <div key={idx} className="flex justify-between items-center text-xs">
                         <div className="flex items-center gap-2">
@@ -606,247 +675,292 @@ export default function WarehouseGame() {
                   {order.status === 'delivering' && (
                     <button
                       onClick={() => deliverOrder(order.id)}
-                      className="w-full mt-3 bg-green-600 hover:bg-green-700 py-1 rounded text-sm transition-colors"
+                      className="w-full mt-2 bg-green-600 hover:bg-green-700 py-2 rounded text-sm transition-colors font-bold"
                     >
-                      Lever Af (+€100 bonus)
+                      🚚 Lever Af (+€100)
                     </button>
                   )}
                 </div>
               ))}
               
               {orders.filter(o => o.status !== 'completed').length === 0 && (
-                <div className="text-center text-neutral-500 py-4">
-                  Geen actieve orders. Klik op "+ Nieuwe" of ga naar het Order Station
+                <div className="text-center text-neutral-500 py-6">
+                  <div className="text-3xl mb-2">📋</div>
+                  <div>Geen actieve orders</div>
+                  <div className="text-xs mt-2">Ga naar het Order Station of klik + Nieuw</div>
                 </div>
               )}
             </div>
           </div>
         </div>
 
-        {/* CENTRUM - GAME GRID */}
+        {/* CENTRUM - GAME WORLD */}
         <div className="flex-1">
-          <div className="bg-neutral-800 p-4 rounded-xl shadow-2xl border-4 border-neutral-700">
-            <div className="flex justify-between items-center mb-3 px-2">
-              <div className="text-xs text-green-400 font-bold">INLADING</div>
-              <div className="text-xs text-blue-400 font-bold">SORTERING</div>
-              <div className="text-xs text-amber-400 font-bold">OPSLAG</div>
-            </div>
+          <div className="relative" style={{ width: GRID_SIZE * CELL_SIZE, height: GRID_SIZE * CELL_SIZE }}>
+            {/* GRID BACKGROUND (optional) */}
+            {showGrid && (
+              <div className="absolute inset-0 grid grid-cols-8 grid-rows-8 gap-0 pointer-events-none">
+                {Array.from({ length: GRID_SIZE * GRID_SIZE }).map((_, i) => {
+                  const x = i % GRID_SIZE;
+                  const y = Math.floor(i / GRID_SIZE);
+                  return (
+                    <div
+                      key={i}
+                      className="border border-neutral-700/50"
+                      onClick={() => handleGridClick(x, y)}
+                    />
+                  );
+                })}
+              </div>
+            )}
             
-            <div 
-              className="grid grid-cols-8 gap-1 relative mx-auto"
-              style={{ width: 'fit-content' }}
-            >
-              {/* GRID ACHTERGROND */}
-              <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.05)_1px,transparent_1px)] bg-[size:20px_20px] pointer-events-none"></div>
-              
-              {grid.map((cell, i) => {
-                const isPlayerHere = i === playerIndex;
-                
-                return (
-                  <div
-                    key={i}
-                    onClick={() => handleCellClick(i)}
-                    className={`w-14 h-14 md:w-16 md:h-16 rounded border relative flex items-center justify-center transition-all
-                      ${!cell ? 'bg-neutral-900/80 border-neutral-800 hover:border-neutral-600' : 'bg-neutral-700/90 border-neutral-600'}
-                      ${isMoveMode && cell ? 'cursor-grab hover:brightness-110 border-orange-400' : ''}
-                      ${selectedShopItem && !cell && !isPlayerHere ? 'hover:bg-green-900/30 cursor-pointer' : ''}
-                      ${isPlayerHere ? 'border-2 border-white shadow-lg' : ''}
-                    `}
-                  >
-                    {/* PLAYER */}
-                    {isPlayerHere && (
-                      <div className="absolute inset-0 z-40 flex items-center justify-center">
-                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center shadow-xl animate-pulse">
-                          <span className="text-xl">{getPlayerDirectionChar(player.direction)}</span>
-                          {player.carrying && (
-                            <div className={`absolute -top-1 -right-1 w-5 h-5 rounded-full border-2 border-white ${getBgColor(player.carrying)}`}></div>
-                          )}
-                        </div>
+            {/* GRID OBJECTS */}
+            {grid.map((cell) => (
+              <div
+                key={cell.id}
+                className="absolute transition-all duration-200 hover:scale-105 cursor-pointer"
+                style={{
+                  left: cell.x * CELL_SIZE + 8,
+                  top: cell.y * CELL_SIZE + 8,
+                  width: CELL_SIZE - 16,
+                  height: CELL_SIZE - 16,
+                }}
+                onClick={() => {
+                  if (selectedShopItem) {
+                    handleGridClick(cell.x, cell.y);
+                  } else if (cell.type === 'sorter' || cell.type === 'pallet') {
+                    cycleColor(cell.id);
+                  } else if (cell.type === 'conveyor' || cell.type === 'cobot') {
+                    // Rotate on click
+                    setGrid(prev => prev.map(c => 
+                      c.id === cell.id 
+                        ? { ...c, rotation: ((c.rotation || 0) + 1) % 4 } 
+                        : c
+                    ));
+                  }
+                }}
+              >
+                {/* ROLLTAINER */}
+                {cell.type === 'rolltainer' && (
+                  <div className="w-full h-full border-2 border-dashed border-zinc-400 rounded-xl bg-zinc-800/90 flex items-center justify-center relative shadow-lg">
+                    <span className="absolute -top-2 -left-2 text-[10px] bg-zinc-600 px-2 py-1 rounded text-white">IN</span>
+                    {cell.crate ? (
+                      <div className={`w-10 h-10 rounded-lg border-2 border-white/50 shadow-xl ${getBgColor(cell.crate)} flex items-center justify-center`}>
+                        <span className="text-sm">📦</span>
                       </div>
-                    )}
-                    
-                    {cell && !isPlayerHere && (
-                      <div className="w-full h-full relative p-1">
-                        {/* ORDERDESK */}
-                        {cell.type === 'orderdesk' && (
-                          <div className="w-full h-full border-2 border-dashed border-blue-400 rounded bg-blue-900/30 flex items-center justify-center relative">
-                            <span className="absolute -top-2 -right-1 text-[8px] bg-blue-600 px-1 rounded text-white">📋</span>
-                            <span className="text-2xl">📋</span>
-                          </div>
-                        )}
-                        
-                        {/* ROLLTAINER */}
-                        {cell.type === 'rolltainer' && (
-                          <div className="w-full h-full border-2 border-dashed border-zinc-400 rounded bg-zinc-800/90 flex items-center justify-center relative">
-                            <span className="absolute -top-2 -left-1 text-[8px] bg-zinc-600 px-1 rounded text-white">IN</span>
-                            {cell.crate ? (
-                              <div className={`w-8 h-8 rounded border border-white/50 shadow-lg ${getBgColor(cell.crate)} flex items-center justify-center`}>
-                                <span className="text-xs">📦</span>
-                              </div>
-                            ) : (
-                              <span className="text-xs animate-pulse">...</span>
-                            )}
-                          </div>
-                        )}
-
-                        {/* COBOT */}
-                        {cell.type === 'cobot' && (
-                          <div className={`w-full h-full flex items-center justify-center transition-transform ${cell.rotation === 1 ? 'rotate-90' : ''}`}>
-                            <div className="w-2 h-full bg-slate-500 rounded-full absolute opacity-50"></div>
-                            <div className="w-full h-2 bg-slate-400 absolute"></div>
-                            <div className="z-10 w-8 h-8 rounded-full bg-slate-300 border-4 border-slate-500 flex items-center justify-center shadow-lg">
-                              <span className="text-sm">🦾</span>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* CONVEYOR */}
-                        {cell.type === 'conveyor' && (
-                          <div className={`w-full h-full flex items-center justify-center ${getRotationClass(cell.rotation)}`}>
-                            <div className="w-full h-full bg-[url('https://www.transparenttextures.com/patterns/diagmonds-light.png')] opacity-20 absolute"></div>
-                            <span className="text-xl text-neutral-400 animate-pulse">⬆</span>
-                          </div>
-                        )}
-
-                        {/* SORTER */}
-                        {cell.type === 'sorter' && (
-                          <div className={`w-full h-full relative border-2 border-double border-neutral-400 rounded ${getRotationClass(cell.rotation)}`}>
-                            <div 
-                              onClick={(e) => cycleColor(e, i)}
-                              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full border border-white shadow-sm cursor-pointer hover:scale-110 z-30 ${getBgColor(cell.color)}`}
-                            ></div>
-                            <span className={`absolute top-0 left-1/2 -translate-x-1/2 text-lg font-bold ${getTextColor(cell.color)}`}>⬆</span>
-                            <span className="absolute top-1/2 right-0 -translate-y-1/2 text-[8px] text-neutral-400">➡</span>
-                            <div className="absolute inset-2 border border-neutral-500 opacity-20 rounded-sm"></div>
-                          </div>
-                        )}
-
-                        {/* PALLET */}
-                        {cell.type === 'pallet' && (
-                          <div className="w-full h-full flex flex-col justify-between bg-black/20 rounded p-1">
-                            <div className="flex justify-between items-start relative h-full">
-                              <div 
-                                onClick={(e) => cycleColor(e, i)} 
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full border border-white shadow-sm cursor-pointer z-30 ${getBgColor(cell.color)}`}
-                              ></div>
-                              <span className={`text-[9px] font-mono absolute top-0 right-0 ${cell.count! >= MAX_PALLET ? 'text-green-400 animate-pulse' : 'text-neutral-400'}`}>
-                                {cell.count || 0}
-                              </span>
-                            </div>
-                            <div className="h-1 bg-amber-800/80 w-full rounded-sm mt-auto"></div>
-                          </div>
-                        )}
-
-                        {/* BEWEGEND KRATJE */}
-                        {cell.crate && cell.type !== 'rolltainer' && (
-                          <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
-                            <div className={`w-6 h-6 rounded-sm shadow-md border border-white/40 animate-pulse ${getBgColor(cell.crate)}`}></div>
-                          </div>
-                        )}
-                      </div>
+                    ) : (
+                      <span className="text-sm animate-pulse">...</span>
                     )}
                   </div>
-                );
-              })}
+                )}
+                
+                {/* ORDERDESK */}
+                {cell.type === 'orderdesk' && (
+                  <div className="w-full h-full border-2 border-dashed border-blue-400 rounded-xl bg-blue-900/40 flex flex-col items-center justify-center relative shadow-lg">
+                    <span className="text-3xl mb-1">📋</span>
+                    <span className="text-[10px] text-blue-300 font-bold">ORDER</span>
+                  </div>
+                )}
+                
+                {/* TRUCK */}
+                {cell.type === 'truck' && (
+                  <div className="w-full h-full border-2 border-dashed border-green-400 rounded-xl bg-green-900/40 flex flex-col items-center justify-center relative shadow-lg">
+                    <span className="text-3xl mb-1">🚛</span>
+                    <span className="text-[10px] text-green-300 font-bold">LEVERING</span>
+                  </div>
+                )}
+                
+                {/* COBOT */}
+                {cell.type === 'cobot' && (
+                  <div 
+                    className="w-full h-full flex items-center justify-center"
+                    style={{ transform: `rotate(${cell.rotation || 0 * 90}deg)` }}
+                  >
+                    <div className="w-12 h-12 rounded-full bg-slate-300 border-4 border-slate-500 flex items-center justify-center shadow-xl">
+                      <span className="text-lg">🦾</span>
+                    </div>
+                  </div>
+                )}
+                
+                {/* CONVEYOR */}
+                {cell.type === 'conveyor' && (
+                  <div 
+                    className="w-full h-full flex items-center justify-center bg-gradient-to-r from-neutral-600 to-neutral-700 rounded-lg shadow-inner"
+                    style={{ transform: `rotate(${cell.rotation || 0 * 90}deg)` }}
+                  >
+                    <div className="w-full h-4 bg-gradient-to-r from-neutral-400 to-neutral-300 animate-pulse rounded"></div>
+                  </div>
+                )}
+                
+                {/* SORTER */}
+                {cell.type === 'sorter' && (
+                  <div 
+                    className="w-full h-full relative border-2 border-double border-neutral-400 rounded-lg shadow-lg"
+                    style={{ transform: `rotate(${cell.rotation || 0 * 90}deg)` }}
+                  >
+                    <div 
+                      className={`absolute top-1 left-1 w-5 h-5 rounded-full border-2 border-white shadow-lg cursor-pointer z-30 ${getBgColor(cell.color)}`}
+                    ></div>
+                    <div className="absolute inset-2 border border-neutral-500 opacity-20 rounded-sm"></div>
+                    <div className="absolute top-0 left-1/2 -translate-x-1/2 text-xl">⬆</div>
+                  </div>
+                )}
+                
+                {/* PALLET */}
+                {cell.type === 'pallet' && (
+                  <div className="w-full h-full flex flex-col justify-between bg-gradient-to-b from-amber-900/80 to-amber-950/80 rounded-lg p-2 shadow-lg">
+                    <div className="flex justify-between items-start relative h-full">
+                      <div 
+                        className={`w-5 h-5 rounded-full border-2 border-white shadow-lg cursor-pointer z-30 ${getBgColor(cell.color)}`}
+                      ></div>
+                      <span className={`text-xs font-mono ${cell.count! >= MAX_PALLET ? 'text-green-400 animate-pulse' : 'text-neutral-300'}`}>
+                        {cell.count || 0}/{MAX_PALLET}
+                      </span>
+                    </div>
+                    <div className="h-2 bg-amber-700 w-full rounded-sm mt-auto"></div>
+                  </div>
+                )}
+                
+                {/* CRATE ON OBJECT */}
+                {cell.crate && cell.type !== 'rolltainer' && (
+                  <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+                    <div className={`w-8 h-8 rounded-lg shadow-xl border-2 border-white/50 animate-bounce ${getBgColor(cell.crate)}`}></div>
+                  </div>
+                )}
+              </div>
+            ))}
+            
+            {/* PLAYER */}
+            <div
+              className="absolute z-50 transition-all duration-100"
+              style={{
+                left: player.x,
+                top: player.y,
+                width: PLAYER_SIZE,
+                height: PLAYER_SIZE,
+                transform: `translate(-50%, -50%) rotate(${player.angle}deg)`,
+              }}
+            >
+              <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 rounded-full shadow-2xl flex items-center justify-center relative">
+                <div className="w-4 h-8 bg-white rounded-t-full absolute top-0"></div>
+                {player.carrying && (
+                  <div className={`absolute -top-2 -right-2 w-6 h-6 rounded-full border-2 border-white shadow-xl ${getBgColor(player.carrying)}`}></div>
+                )}
+              </div>
             </div>
             
-            <p className="text-center text-xs text-neutral-500 mt-3">
-              WASD bewegen • SPATIE interacteren • Klik machines om te draaien
-            </p>
+            {/* GRID COORDINATES */}
+            {showGrid && (
+              <div className="absolute bottom-2 right-2 text-xs text-neutral-500 bg-black/50 px-2 py-1 rounded">
+                Grid: {showGrid ? 'ON' : 'OFF'}
+              </div>
+            )}
+          </div>
+          
+          {/* GAME INFO */}
+          <div className="mt-4 text-center text-sm text-neutral-400">
+            {selectedShopItem ? (
+              <div className="animate-pulse text-orange-400">
+                Klik op een lege grid cel om {selectedShopItem} te plaatsen (V toont grid)
+              </div>
+            ) : (
+              <div>
+                WASD bewegen • E interacteren • V toont/verbergt grid • Klik op machines om te draaien
+              </div>
+            )}
           </div>
         </div>
 
-        {/* RECHTERKANT - SHOP & AUTOMATISERING */}
+        {/* RECHTERKANT - SHOP */}
         <div className="flex flex-col gap-4 w-full lg:w-80">
           {/* SHOP */}
-          <div className="bg-neutral-800 p-4 rounded-xl border border-neutral-700">
-            <h2 className="font-bold text-neutral-300 mb-3 border-b border-neutral-600 pb-2">AUTOMATISERING</h2>
-            <div className="space-y-2">
+          <div className="bg-neutral-800 p-4 rounded-xl border-2 border-neutral-700 shadow-lg">
+            <h2 className="font-bold text-neutral-300 mb-3 text-lg">🏬 AUTOMATISERING</h2>
+            <div className="space-y-3">
               {SHOP_ITEMS.map((item) => (
                 <button
                   key={item.type}
-                  onClick={() => { setSelectedShopItem(item.type); setIsMoveMode(false); }}
-                  className={`flex flex-col p-2 rounded border transition-all text-left w-full
-                    ${selectedShopItem === item.type ? 'border-orange-500 bg-neutral-700' : 'border-neutral-600 bg-neutral-800 hover:bg-neutral-700'}
-                    ${money < item.price ? 'opacity-40' : ''}
+                  onClick={() => setSelectedShopItem(item.type)}
+                  className={`flex flex-col p-3 rounded-xl border-2 transition-all text-left w-full
+                    ${selectedShopItem === item.type ? 'border-orange-500 bg-neutral-700 shadow-inner' : 'border-neutral-600 bg-neutral-800 hover:bg-neutral-700'}
+                    ${money < item.price ? 'opacity-50 cursor-not-allowed' : ''}
                   `}
                   disabled={money < item.price}
                 >
                   <div className="flex justify-between items-center w-full">
-                    <span className="font-bold flex items-center gap-2">{item.icon} {item.label}</span>
-                    <span className="text-green-400 font-mono text-sm">€{item.price}</span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl">{item.icon}</span>
+                      <div>
+                        <div className="font-bold text-sm">{item.label}</div>
+                        <div className="text-[10px] text-neutral-400">{item.desc}</div>
+                      </div>
+                    </div>
+                    <span className="text-green-400 font-mono font-bold">€{item.price}</span>
                   </div>
-                  <span className="text-[10px] text-neutral-400 mt-1">{item.desc}</span>
                 </button>
               ))}
               
-              <div className="mt-4 pt-4 border-t border-neutral-600">
+              <div className="mt-4 pt-4 border-t-2 border-neutral-600">
+                <div className="text-xs text-neutral-400 mb-2 text-center">
+                  Druk V om grid te tonen voor plaatsing
+                </div>
                 <button
-                  onClick={() => { setIsMoveMode(!isMoveMode); setSelectedShopItem(null); setMoveSourceIndex(null); }}
-                  className={`w-full p-3 rounded font-bold text-sm transition-all
-                      ${isMoveMode ? 'bg-orange-600 text-white animate-pulse' : 'bg-neutral-600 text-neutral-300'}
-                  `}
+                  onClick={() => setSelectedShopItem(null)}
+                  className="w-full p-3 bg-neutral-700 hover:bg-neutral-600 rounded-lg font-bold text-sm transition-colors"
                 >
-                  {isMoveMode ? 'STOP VERPLAATSEN' : '🛠️ VERPLAATS MODUS'}
+                  ❌ Cancel Selectie
                 </button>
-                <p className="text-xs text-neutral-400 mt-2 text-center">
-                  Klik een object en dan een lege plek om te verplaatsen
-                </p>
               </div>
             </div>
           </div>
 
-          {/* STATISTIEKEN */}
-          <div className="bg-neutral-800 p-4 rounded-xl border border-neutral-700">
-            <h3 className="font-bold text-neutral-300 mb-3 text-sm border-b border-neutral-600 pb-2">STATISTIEKEN</h3>
+          {/* STATISTICS */}
+          <div className="bg-neutral-800 p-4 rounded-xl border-2 border-neutral-700 shadow-lg">
+            <h3 className="font-bold text-neutral-300 mb-3 text-lg">📊 STATISTIEKEN</h3>
             <div className="space-y-3">
               <div className="flex justify-between items-center">
-                <span className="text-xs text-neutral-400">Automatische machines:</span>
-                <span className="text-xs font-mono text-blue-400">
-                  {grid.filter(c => c?.type === 'cobot' || c?.type === 'conveyor' || c?.type === 'sorter').length}
+                <span className="text-sm text-neutral-400">Automatische machines:</span>
+                <span className="text-sm font-mono text-blue-400">
+                  {grid.filter(c => c.type === 'cobot' || c.type === 'conveyor' || c.type === 'sorter').length}
                 </span>
               </div>
               <div className="flex justify-between items-center">
-                <span className="text-xs text-neutral-400">Actieve orders:</span>
-                <span className="text-xs font-mono text-green-400">
+                <span className="text-sm text-neutral-400">Actieve orders:</span>
+                <span className="text-sm font-mono text-green-400">
                   {orders.filter(o => o.status !== 'completed').length}
                 </span>
               </div>
               <div className="flex justify-between items-center">
-                <span className="text-xs text-neutral-400">Totale winst:</span>
-                <span className="text-xs font-mono text-yellow-400">
-                  €{score * 350 + (orders.filter(o => o.status === 'completed').length * 100)}
+                <span className="text-sm text-neutral-400">Verzamelde items:</span>
+                <span className="text-sm font-mono text-yellow-400">
+                  {grid.filter(c => c.type === 'pallet').reduce((sum, p) => sum + (p.count || 0), 0)}
                 </span>
               </div>
-              <div className="pt-2 border-t border-neutral-700">
-                <div className="text-xs text-neutral-400 mb-1">STRATEGIE:</div>
-                <ul className="text-xs text-neutral-300 space-y-1">
-                  <li>• Gebruik automatisering voor bulk orders</li>
-                  <li>• Handmatig voor speciale orders</li>
-                  <li>• Mix rolltainers met kleuren</li>
-                  <li>• Sorteer machines besparen tijd</li>
-                </ul>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-neutral-400">Totale omzet:</span>
+                <span className="text-sm font-mono text-green-400">
+                  €{score * 350}
+                </span>
               </div>
             </div>
-          </div>
-
-          {/* GAME TIPS */}
-          <div className="bg-blue-900/30 p-4 rounded-xl border border-blue-700">
-            <h3 className="font-bold text-blue-300 mb-2 text-sm">💡 TIPS</h3>
-            <ul className="text-xs text-blue-200 space-y-1">
-              <li>• Begin bij het Order Station voor nieuwe orders</li>
-              <li>• Gebruik automatische machines voor efficiëntie</li>
-              <li>• Zet pallets op de juiste kleur voor elke order</li>
-              <li>• Speed 3x als je automatisering hebt staan</li>
-              <li>• Verkoop oude machines om upgrades te kopen</li>
-            </ul>
+            
+            <div className="mt-4 pt-4 border-t-2 border-neutral-600">
+              <h4 className="font-bold text-neutral-300 mb-2 text-sm">🎯 TIPS</h4>
+              <ul className="text-xs text-neutral-300 space-y-1">
+                <li>• Gebruik automatisering voor grote orders</li>
+                <li>• Zet pallets bij sorteer machines</li>
+                <li>• Cobots werken tussen rolltainers en banden</li>
+                <li>• Trucks geven bonus bij levering</li>
+                <li>• Snelheid 3x als automatisering staat</li>
+              </ul>
+            </div>
           </div>
         </div>
       </div>
 
       {/* FOOTER */}
       <div className="mt-6 text-center text-xs text-neutral-500 max-w-3xl">
-        <p>WAREHOUSE MANAGER • Bestuur je karakter met WASD • Neem orders aan • Gebruik automatisering om te schalen • Word de beste warehouse manager!</p>
+        <p>WAREHOUSE SIMULATOR PRO • Pixel-based movement • Automatisering • Order Management • Schaal je warehouse naar de volgende level!</p>
       </div>
     </div>
   );
